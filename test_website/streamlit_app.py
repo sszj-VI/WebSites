@@ -50,19 +50,24 @@ def apply_compact_css():
         100% { box-shadow: 0 0 0 2px rgba(76,120,168,.28); }
       }
 
-      /* —— 安全版：用背景画两侧渐变条带，不用伪元素 —— */
+      /* —— 两侧渐变条带（更宽 + 黄→蓝） —— */
 .stApp{
-  /* 基础背景色 */
   background-color: #ffffff !important;
 
-  /* 左侧条带、右侧条带：两张背景图叠加 */
+  /* 左条带、右条带 */
   background-image:
-    linear-gradient(180deg, rgba(76,120,168,.35), rgba(229,87,86,.35)),
-    linear-gradient(180deg, rgba(229,87,86,.35), rgba(76,120,168,.35));
+    /* 左：从上到下 由黄到蓝 */
+    linear-gradient(180deg, rgba(245,158,11,.42) 0%, rgba(37,99,235,.42) 100%),
+    /* 右：同样从上到下 由黄到蓝（想做镜像可把第二个调成 0% 蓝 → 100% 黄） */
+    linear-gradient(180deg, rgba(245,158,11,.42) 0%, rgba(37,99,235,.42) 100%);
   background-repeat: no-repeat, no-repeat;
   background-position: left top, right top;
-  background-size: 14px 100vh, 14px 100vh;   /* 条带宽度 × 视口高度 */
-  background-attachment: fixed, fixed;       /* 固定在两侧，不随滚动抖动 */
+
+  /* ⬅ 条带宽度（原来 14px）*/
+  background-size: 24px 100vh, 24px 100vh;
+
+  /* 固定在两侧，不随滚动抖动 */
+  background-attachment: fixed, fixed;
 }
 
       /* 在有侧边栏时，条带自然位于侧边栏下方，不影响交互 */
