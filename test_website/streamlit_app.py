@@ -67,11 +67,14 @@ with st.sidebar:
 
     # 3) 纵坐标 Y：只能选数值列，且不能与 X 相同
     y_options = [c for c in numeric_candidates if c != x_col]
-    # 允许默认不选，交由下面的“空选择拦截”处理
+
+    # 关键修复：为 Y 多选使用“随 X 变化的 key”，切换 X 时 Y 会重置为默认（空）
+    y_key = f"ycols::{x_col}"
     y_cols = st.multiselect(
         "纵坐标 (Y，可多选)",
         options=y_options,
-        default=[],
+        default=[],                     # 允许为空
+        key=y_key,                      # 每个 X 有自己的一份选择状态
         placeholder="请选择 1~3 个数值列，例如 trips、avg_tip …"
     )
 
@@ -117,7 +120,7 @@ else:
 for c in y_cols:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 
-# ===================== “未选择 Y” 的友好提示（核心改动） =====================
+# ===================== “未选择 Y” 的友好提示（保证不再报错） =====================
 if len(y_cols) == 0:
     st.info("👉 请在左侧 **选择至少一个纵坐标（数值列）** 后再查看图表。")
     with st.expander("我能选择哪些列？（数值列清单）", expanded=False):
@@ -129,9 +132,8 @@ df = df.dropna(subset=["_X_key"] + y_cols)
 grouped = df.groupby("_X_key")
 agg_map = {c: agg_fn for c in y_cols}
 
-# 计算聚合视图；同时计算计数 trips 作为参考（高亮用）
+# 仅根据所选 Y 生成聚合视图 —— 不再强行添加 trips 列（修复点 1）
 df_view = grouped.agg(agg_map).reset_index().rename(columns={"_X_key": x_col})
-df_view["trips"] = grouped.size().values  # 计数，仅做参考高亮（可无视）
 
 # 对小时/月份做自然排序；数值列自动排序；类别列保持原出现顺序
 if x_is_datetime and x_time_mode in ["小时(0–23)", "月份(1~12)"]:
@@ -143,7 +145,7 @@ if x_is_datetime and x_time_mode in ["小时(0–23)", "月份(1~12)"]:
 elif pd.api.types.is_numeric_dtype(df_view[x_col]):
     df_view = df_view.sort_values(x_col)
 
-# ===================== 展示：小多图 =====================
+# ===================== 展示：小多图（按各自 Y 的峰值高亮） =====================
 st.subheader(f"按「{x_col}」聚合（{agg_fn}）")
 st.caption(
     f"X = 「{x_col}」{' · 时间派生：'+x_time_mode if x_is_datetime else ''}；"
@@ -153,16 +155,17 @@ st.caption(
 if df_view.empty:
     st.warning("聚合后没有可展示的数据。请检查 X/Y 选择与数据有效性。")
 else:
-    # 若有 trips，可用 trips 的峰值位置来高亮（仅做视觉提示）
-    peak_x = None
-    if "trips" in df_view.columns and df_view["trips"].notna().any():
-        try:
-            peak_x = df_view.loc[df_view["trips"].idxmax(), x_col]
-        except Exception:
-            peak_x = None
-
     for y in y_cols:
         st.markdown(f"**· {y}**")
+
+        # 以当前 y 的峰值做高亮（不依赖 trips）
+        peak_x = None
+        if df_view[y].notna().any():
+            try:
+                peak_x = df_view.loc[df_view[y].idxmax(), x_col]
+            except Exception:
+                peak_x = None
+
         colors = []
         for xv in df_view[x_col]:
             if (peak_x is not None) and (str(xv) == str(peak_x)):
