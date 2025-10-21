@@ -88,20 +88,45 @@ with st.sidebar:
     hour_range = st.slider("展示小时范围", 0, 23, value=st.session_state["hour_range"], key="hour_range")
     hr_min, hr_max = hour_range
 
-    # 可选参量 = df 中所有数值列（排除 pickup_hour）
+    # 现有数值列（小时级 df 的列），排除 pickup_hour
     numeric_cols = [c for c in df.columns if c != "pickup_hour" and pd.api.types.is_numeric_dtype(df[c])]
-    # 默认选 trips（若存在），否则选第一个数值列
-    default_choices = ["trips"] if "trips" in numeric_cols else (numeric_cols[:1] if numeric_cols else [])
-    selected_metrics = st.multiselect("选择参量（可多选）", options=numeric_cols, default=default_choices,
-                                     help="可同时选择多个参量进行统计与绘图")
 
-    # “显示占比”仅对 trips 有意义；多选时也只作用于 trips 那张图
+    st.divider()
+    st.markdown("**自定义参量（可选）**")
+    st.caption("用列名写表达式：支持 + - * / 和括号。示例：`trips*1.2`、`trips/100`、`trips*avg_tip`")
+    expr = st.text_input("表达式", placeholder="例如：trips*avg_tip 或 trips/100")
+
+    # 计算自定义参量，成功则加入 df 与候选列表
+    custom_label = None
+    if expr.strip():
+        try:
+            # 只允许用当前数值列；构造安全局部变量环境
+            local_env = {col: pd.to_numeric(df[col], errors="coerce") for col in numeric_cols}
+            # 计算；这里用 pandas.eval 的 numexpr 引擎优先，失败再退回 python 引擎
+            try:
+                df["custom_metric"] = pd.eval(expr, local_dict=local_env, engine="numexpr")
+            except Exception:
+                df["custom_metric"] = pd.eval(expr, local_dict=local_env, engine="python")
+            custom_label = f"custom({expr})"
+            df.rename(columns={"custom_metric": custom_label}, inplace=True)
+            numeric_cols.append(custom_label)
+            st.success(f"已生成自定义参量：{custom_label}")
+        except Exception as e:
+            st.error(f"表达式无效：{e}")
+
+    # 参量多选（把 trips 放在最前，默认选它）
+    ordered = (["trips"] if "trips" in numeric_cols else []) + [c for c in numeric_cols if c != "trips"]
+    default_choices = ["trips"] if "trips" in ordered else (ordered[:1] if ordered else [])
+    selected_metrics = st.multiselect("选择参量（可多选）", options=ordered, default=default_choices,
+                                     help="多选时会生成多张小图；不同量纲更易读")
+
+    # “显示占比”只对 trips 生效
     enable_share = ("trips" in selected_metrics)
     show_pct = st.checkbox("显示占比（仅对 trips）", value=False, disabled=not enable_share)
     smooth   = st.checkbox("显示移动平均（3小时）", value=False)
 
     st.divider()
-    st.markdown("**提示**：多选时将生成小多图（每个参量一张），避免不同量纲混在一张图难以阅读。")
+    st.markdown("表达式小贴士：只需使用上面列出的列名；不支持函数调用。")
     def reset_range(): st.session_state["hour_range"] = DEFAULT_RANGE
     st.button("重置筛选为 0–23 点", on_click=reset_range)
 
