@@ -5,8 +5,8 @@ import plotly.express as px
 from pathlib import Path
 
 # ============ 基础设置 ============
-st.set_page_config(page_title="24 小时出行面板", page_icon="🕒", layout="wide")
-st.title("24 小时出行面板")
+st.set_page_config(page_title="数据聚合处理网站", page_icon="🕒", layout="wide")
+st.title("数据聚合处理网站")
 st.caption("用户自选横纵坐标 · 自动识别时间列派生 · 原始/已聚合统一处理 · 多参量小多图")
 
 # ============ 读取 CSV（上传优先，默认兜底） ============
