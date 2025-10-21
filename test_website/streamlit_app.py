@@ -1,230 +1,172 @@
-# test_website/streamlit_app.py
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 from pathlib import Path
 
-# ============ 页面基础 ============
+# ============ 基础设置 ============
 st.set_page_config(page_title="24 小时出行面板", page_icon="🕒", layout="wide")
 st.title("24 小时出行面板")
-st.caption("峰值、占比与小费趋势 · 支持上传同结构 CSV（可上传原始明细或已聚合表）")
+st.caption("用户自选横纵坐标 · 自动识别时间列派生 · 原始/已聚合统一处理 · 多参量小多图")
 
-# ============ 数据加载：上传优先 → 默认兜底（已聚合） → 提示 ============
-DEFAULT_AGG = Path(__file__).parent / "data" / "hourly_trips.csv"
-up = st.file_uploader("上传原始或已聚合的 CSV（均可）", type=["csv"])
+# ============ 读取 CSV（上传优先，默认兜底） ============
+DEFAULT = Path(__file__).parent / "data" / "hourly_trips.csv"
+up = st.file_uploader("上传 CSV（原始明细或已聚合均可）", type=["csv"])
 
-def load_csv(src):
-    # 自动识别常见分隔符
-    return pd.read_csv(src, sep=None, engine="python")
+def read_csv_any(src):
+    return pd.read_csv(src, sep=None, engine="python")  # 自动识别常见分隔符
 
 if up is not None:
-    raw = load_csv(up)
-elif DEFAULT_AGG.exists():
-    raw = load_csv(DEFAULT_AGG)
+    raw = read_csv_any(up)
+elif DEFAULT.exists():
+    raw = read_csv_any(DEFAULT)
 else:
-    st.info("请上传 CSV；或先放置示例 data/hourly_trips.csv。")
+    st.info("请上传 CSV；或在 data/hourly_trips.csv 放置一份示例。")
     st.stop()
 
-# ============ 原始/已聚合自适应 ============
-CANDIDATE_TIME_COLS = [
-    "tpep_pickup_datetime","pickup_datetime","pickup_time","pickup_ts",
-    "started_at","start_time","timestamp","datetime","date","time"
-]
-CANDIDATE_TIP_COLS = ["avg_tip","tip_amount","tip","tip_amt"]
+if raw.empty:
+    st.error("读取到的表为空，请检查 CSV 内容。")
+    st.stop()
 
-def to_num(s): return pd.to_numeric(s, errors="coerce")
-def is_aggregated(df): return {"pickup_hour","trips"}.issubset(df.columns)
+# ============ 推断类型：时间列候选 & 数值列候选 ============
+def can_parse_datetime(series) -> float:
+    """返回该列可解析为时间戳的比例（0~1）"""
+    try:
+        return pd.to_datetime(series, errors="coerce").notna().mean()
+    except Exception:
+        return 0.0
 
-def aggregate_hourly(df):
-    """从原始明细聚合到小时级：trips +（若有）avg_tip"""
-    time_col = next((c for c in CANDIDATE_TIME_COLS if c in df.columns), None)
-    if time_col is None:
-        return None
-    ts = pd.to_datetime(df[time_col], errors="coerce")
-    out = pd.DataFrame({"pickup_hour": ts.dt.hour})
-    out["trips"] = 1
+# 候选时间列：可解析率 > 0.5 的列
+datetime_candidates = [c for c in raw.columns if can_parse_datetime(raw[c]) > 0.5]
 
-    tip_col = next((c for c in CANDIDATE_TIP_COLS if c in df.columns), None)
-    if tip_col:
-        df["_tip_num"] = to_num(df[tip_col])
-        out = pd.concat([out, df["_tip_num"]], axis=1)
+# 数值列候选：能转为数值且非时间戳（即使原始是字符串也尝试转换）
+def is_numeric_like(series):
+    try:
+        return pd.to_numeric(series, errors="coerce").notna().mean() > 0.5
+    except Exception:
+        return False
 
-    if tip_col:
-        agg = out.groupby("pickup_hour", dropna=True).agg(
-            trips=("trips","sum"),
-            avg_tip=("_tip_num","mean")
-        ).reset_index()
-        agg["avg_tip"] = agg["avg_tip"].round(2)
-    else:
-        agg = out.groupby("pickup_hour", dropna=True).agg(trips=("trips","sum")).reset_index()
+numeric_candidates = [c for c in raw.columns if is_numeric_like(raw[c])]
 
-    agg = agg.dropna(subset=["pickup_hour"]).copy()
-    agg["pickup_hour"] = agg["pickup_hour"].astype(int)
-    return agg.sort_values("pickup_hour")
-
-# 得到 df（小时级）
-if is_aggregated(raw):
-    df = raw.copy()
-    df["pickup_hour"] = to_num(df["pickup_hour"]).astype("Int64")
-    df["trips"] = to_num(df["trips"])
-    if "avg_tip" in df.columns:
-        df["avg_tip"] = to_num(df["avg_tip"])
-    df = df.dropna(subset=["pickup_hour","trips"]).copy()
-    df["pickup_hour"] = df["pickup_hour"].astype(int)
-    df = df.sort_values("pickup_hour")
-else:
-    df = aggregate_hourly(raw)
-    if df is None:
-        st.error("未识别到时间列；请上传包含时间戳的原始明细，或已聚合表（pickup_hour,trips[,avg_tip]）。")
-        st.stop()
-
-# ============ 侧边栏：筛选 & 多参量选择 ============
+# ============ 侧边栏：选择 X、X 的时间派生、Y 列、聚合方式 ============
 with st.sidebar:
-    st.subheader("筛选")
+    st.subheader("维度与度量")
 
-    DEFAULT_RANGE = (0, 23)
-    if "hour_range" not in st.session_state:
-        st.session_state["hour_range"] = DEFAULT_RANGE
-    hour_range = st.slider("展示小时范围", 0, 23, value=st.session_state["hour_range"], key="hour_range")
-    hr_min, hr_max = hour_range
+    # 1) 横坐标 X：可选任意列（时间/数值/类别）
+    x_col = st.selectbox("横坐标 (X)", options=list(raw.columns), help="可选时间/数值/类别列。时间列可进行派生后聚合")
 
-    # 现有数值列（小时级 df 的列），排除 pickup_hour
-    numeric_cols = [c for c in df.columns if c != "pickup_hour" and pd.api.types.is_numeric_dtype(df[c])]
+    # 2) 若 X 是时间列，选派生方式；否则无派生
+    x_is_datetime = x_col in datetime_candidates
+    x_time_mode = None
+    if x_is_datetime:
+        x_time_mode = st.selectbox(
+            "时间派生",
+            ["小时(0–23)", "日期", "星期(一~日)", "月份(1~12)"],
+            help="从时间列派生一个离散分组键，并按此聚合"
+        )
 
-    st.divider()
-    st.markdown("**自定义参量（可选）**")
-    st.caption("用列名写表达式：支持 + - * / 和括号。示例：`trips*1.2`、`trips/100`、`trips*avg_tip`")
-    expr = st.text_input("表达式", placeholder="例如：trips*avg_tip 或 trips/100")
+    # 3) 纵坐标 Y：只能选数值列，且不能选择与 X 相同（若 X 也是数值列）
+    y_options = [c for c in numeric_candidates if c != x_col]
+    if not y_options:
+        st.error("未检测到可用的数值列用于纵坐标，请检查数据。")
+        st.stop()
+    default_y = ["trips"] if "trips" in y_options else y_options[:1]
+    y_cols = st.multiselect("纵坐标 (Y，可多选)", options=y_options, default=default_y,
+                            help="仅数值列可作为度量；多选将生成多张小图")
 
-    # 计算自定义参量，成功则加入 df 与候选列表
-    custom_label = None
-    if expr.strip():
-        try:
-            # 只允许用当前数值列；构造安全局部变量环境
-            local_env = {col: pd.to_numeric(df[col], errors="coerce") for col in numeric_cols}
-            # 计算；这里用 pandas.eval 的 numexpr 引擎优先，失败再退回 python 引擎
-            try:
-                df["custom_metric"] = pd.eval(expr, local_dict=local_env, engine="numexpr")
-            except Exception:
-                df["custom_metric"] = pd.eval(expr, local_dict=local_env, engine="python")
-            custom_label = f"custom({expr})"
-            df.rename(columns={"custom_metric": custom_label}, inplace=True)
-            numeric_cols.append(custom_label)
-            st.success(f"已生成自定义参量：{custom_label}")
-        except Exception as e:
-            st.error(f"表达式无效：{e}")
-
-    # 参量多选（把 trips 放在最前，默认选它）
-    ordered = (["trips"] if "trips" in numeric_cols else []) + [c for c in numeric_cols if c != "trips"]
-    default_choices = ["trips"] if "trips" in ordered else (ordered[:1] if ordered else [])
-    selected_metrics = st.multiselect("选择参量（可多选）", options=ordered, default=default_choices,
-                                     help="多选时会生成多张小图；不同量纲更易读")
-
-    # “显示占比”只对 trips 生效
-    enable_share = ("trips" in selected_metrics)
-    show_pct = st.checkbox("显示占比（仅对 trips）", value=False, disabled=not enable_share)
-    smooth   = st.checkbox("显示移动平均（3小时）", value=False)
+    # 4) 选择聚合方式（对 Y 应用）
+    agg_fn = st.selectbox("聚合方式（对 Y 列）", ["sum", "mean", "median", "max", "min"], index=0)
 
     st.divider()
-    st.markdown("表达式小贴士：只需使用上面列出的列名；不支持函数调用。")
-    def reset_range(): st.session_state["hour_range"] = DEFAULT_RANGE
-    st.button("重置筛选为 0–23 点", on_click=reset_range)
+    st.caption("提示：若上传原始明细，可将时间列派生为“小时/日期/星期/月”以便聚合；若上传已聚合表(如含 pickup_hour/trips)，也可直接选择任意列为 X。")
 
-# 过滤 & 排序
-view = df[(df["pickup_hour"] >= hr_min) & (df["pickup_hour"] <= hr_max)].copy().sort_values("pickup_hour")
-if len(view) == 0:
-    st.warning("当前筛选范围内没有数据。"); st.stop()
+# ============ 生成用于绘图的数据：X 派生 + 分组聚合 ============
+df = raw.copy()
 
-# KPI 仍基于 trips（如不存在则给兜底）
-total = float(view["trips"].sum()) if "trips" in view.columns else float("nan")
-if "trips" in view.columns and view["trips"].notna().any():
-    peak_row = view.loc[view["trips"].idxmax()]
-    peak_hour = int(peak_row["pickup_hour"]); peak_trips = int(peak_row["trips"])
-    peak_share = (peak_trips / total * 100) if total else 0.0
+# 1) 生成分组键 X_key
+if x_is_datetime:
+    ts = pd.to_datetime(df[x_col], errors="coerce")
+    if x_time_mode == "小时(0–23)":
+        df["_X_key"] = ts.dt.hour
+    elif x_time_mode == "日期":
+        df["_X_key"] = ts.dt.date.astype("string")
+    elif x_time_mode == "星期(一~日)":
+        # 周一=0，周日=6；映射到中文
+        wd = ts.dt.weekday
+        mapping = {0:"一",1:"二",2:"三",3:"四",4:"五",5:"六",6:"日"}
+        df["_X_key"] = wd.map(mapping)
+        # 固定顺序
+        cat_type = pd.CategoricalDtype(categories=list(mapping.values()), ordered=True)
+        df["_X_key"] = df["_X_key"].astype(cat_type)
+    elif x_time_mode == "月份(1~12)":
+        df["_X_key"] = ts.dt.month
+    else:
+        df["_X_key"] = ts.astype("string")
 else:
-    peak_hour, peak_trips, peak_share = 0, 0, 0.0
+    # 非时间：直接使用原值作为分组键（转为 string 以兼容类别/混合）
+    df["_X_key"] = df[x_col].astype("string")
 
-c1, c2, c3 = st.columns(3)
-c1.metric("总行程数", f"{int(total):,}" if pd.notnull(total) else "—")
-c2.metric("最忙时段", f"{peak_hour:02d}:00", f"{peak_trips:,}" if peak_trips else "—")
-c3.metric("峰值占比", f"{peak_share:.2f}%" if peak_trips else "—")
+# 2) 仅保留 Y 列可转数值的部分
+for c in y_cols:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+df = df.dropna(subset=["_X_key"] + y_cols)
 
-# ============ 图表 ============
-tab1, tab2 = st.tabs(["主图（多参量）", "数据表"])
+# 3) 分组聚合（对每个 Y 应用同一个聚合函数）；同时计算计数 trips 作为参考
+grouped = df.groupby("_X_key")
+agg_map = {c: agg_fn for c in y_cols}
+df_view = grouped.agg(agg_map).reset_index().rename(columns={"_X_key": x_col})
+df_view["trips"] = grouped.size().values  # 计数（可做参考高亮）
+
+# 4) 为“小时(0–23)”和“月份(1~12)”排序；数值/日期自动排序；类别按出现顺序
+if x_is_datetime and x_time_mode in ["小时(0–23)", "月份(1~12)"]:
+    try:
+        df_view[x_col] = pd.to_numeric(df_view[x_col], errors="coerce")
+        df_view = df_view.sort_values(x_col)
+    except Exception:
+        pass
+elif pd.api.types.is_numeric_dtype(df_view[x_col]):
+    df_view = df_view.sort_values(x_col)
+
+# ============ 展示：小多图 ============
+st.subheader(f"按「{x_col}」聚合（{agg_fn}）")
+st.caption(f"X=「{x_col}」{' · 时间派生：'+x_time_mode if x_is_datetime else ''}；Y={y_cols}；样本数={int(df.shape[0]):,}")
+
+if df_view.empty:
+    st.warning("聚合后没有可展示的数据。请检查 X/Y 选择与数据有效性。")
+else:
+    # 如果同时选择了很多 Y，这里逐个渲染
+    for y in y_cols:
+        st.markdown(f"**· {y}**")
+        # 若有 trips，可用 trips 的峰值位置来高亮（仅做视觉提示）
+        peak_x = None
+        if "trips" in df_view.columns and df_view["trips"].notna().any():
+            try:
+                peak_x = df_view.loc[df_view["trips"].idxmax(), x_col]
+            except Exception:
+                peak_x = None
+
+        colors = []
+        for xv in df_view[x_col]:
+            if (peak_x is not None) and (str(xv) == str(peak_x)):
+                colors.append("#E45756")
+            else:
+                colors.append("#4C78A8")
+
+        fig = px.bar(df_view, x=x_col, y=y, labels={x_col:"X", y:y})
+        fig.update_traces(marker_color=colors, hovertemplate=f"{x_col}=%{{x}}<br>{y}=%{{y}}<extra></extra>")
+        st.plotly_chart(fig, use_container_width=True)
+
+# ============ 原表/聚合表预览 & 下载 ============
+tab1, tab2 = st.tabs(["当前聚合视图 (可下载)", "原始数据预览"])
 
 with tab1:
-    if not selected_metrics:
-        st.info("请至少选择一个参量。")
-    else:
-        # 单选：保持原先单图风格
-        if len(selected_metrics) == 1:
-            metric = selected_metrics[0]
-            plot_df = view.copy()
-
-            # trips 的占比/平滑
-            if metric == "trips" and show_pct:
-                plot_df["share"] = (plot_df["trips"] / total * 100).round(2) if total > 0 else 0.0
-                ycol, y_label = "share", "占比(%)"
-            else:
-                ycol, y_label = metric, metric
-
-            if smooth and ycol in plot_df.columns and ycol != "share" and len(plot_df) >= 3:
-                plot_df[f"{ycol}_sma3"] = plot_df[ycol].rolling(3, center=True).mean()
-                ycol_plot = f"{ycol}_sma3"
-            else:
-                ycol_plot = ycol
-
-            # 峰值高亮依据 trips（若有）
-            colors = ["#E45756" if ("trips" in view.columns and int(h) == peak_hour) else "#4C78A8"
-                      for h in plot_df["pickup_hour"]]
-            fig = px.bar(plot_df, x="pickup_hour", y=ycol_plot,
-                         labels={"pickup_hour":"小时", ycol_plot:y_label})
-            fig.update_traces(marker_color=colors,
-                              hovertemplate="小时=%{x}<br>"+y_label+"=%{y}<extra></extra>")
-            # 注释（若该小时存在 ycol_plot 的值）
-            try:
-                if "trips" in view.columns and peak_trips > 0 and ycol_plot in plot_df.columns:
-                    ann_y = plot_df.loc[plot_df["pickup_hour"] == peak_hour, ycol_plot].iloc[0]
-                    fig.add_annotation(x=peak_hour, y=ann_y, text="峰值(以 trips)", showarrow=True, yshift=10)
-            except Exception:
-                pass
-
-            st.plotly_chart(fig, use_container_width=True)
-
-        # 多选：为每个参量画一张“小多图”
-        else:
-            for metric in selected_metrics:
-                st.subheader(f"· {metric}")
-                plot_df = view.copy()
-                ycol, y_label = metric, metric
-
-                # 仅对 trips 做占比
-                if metric == "trips" and show_pct:
-                    plot_df["share"] = (plot_df["trips"] / total * 100).round(2) if total > 0 else 0.0
-                    ycol, y_label = "share", "占比(%)"
-
-                # 平滑
-                if smooth and ycol in plot_df.columns and ycol != "share" and len(plot_df) >= 3:
-                    plot_df[f"{ycol}_sma3"] = plot_df[ycol].rolling(3, center=True).mean()
-                    ycol_plot = f"{ycol}_sma3"
-                else:
-                    ycol_plot = ycol
-
-                colors = ["#E45756" if ("trips" in view.columns and int(h) == peak_hour) else "#4C78A8"
-                          for h in plot_df["pickup_hour"]]
-                fig = px.bar(plot_df, x="pickup_hour", y=ycol_plot,
-                             labels={"pickup_hour":"小时", ycol_plot:y_label})
-                fig.update_traces(marker_color=colors,
-                                  hovertemplate="小时=%{x}<br>"+y_label+"=%{y}<extra></extra>")
-                st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(df_view, use_container_width=True, hide_index=True)
+    st.download_button(
+        "下载当前聚合视图 CSV",
+        df_view.to_csv(index=False).encode("utf-8"),
+        file_name="aggregated_view.csv",
+        mime="text/csv"
+    )
 
 with tab2:
-    st.dataframe(view.reset_index(drop=True), use_container_width=True, hide_index=True)
-
-# ============ 下载当前视图 ============
-st.download_button(
-    "下载当前视图CSV",
-    view.to_csv(index=False).encode("utf-8"),
-    file_name="hourly_view.csv",
-    mime="text/csv"
-)
+    st.dataframe(raw.head(200), use_container_width=True, hide_index=True)
