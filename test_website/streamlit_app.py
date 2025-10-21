@@ -7,48 +7,111 @@ from pathlib import Path
 # ============ 页面基础 ============
 st.set_page_config(page_title="按小时聚合展示", layout="wide")
 st.title("按小时聚合展示")
-st.caption("平台（Kaggle/PySpark）先做聚合 → 前端只做筛选/占比/平滑等轻计算，保证演示稳定。")
+st.caption("平台（Kaggle/PySpark）可先做聚合；本页也支持读取原始明细并现场聚合到小时级。")
 
 # ============ 数据加载：上传优先 → 默认兜底 → 提示 ============
-DEFAULT = Path(__file__).parent / "data" / "hourly_trips.csv"
-up = st.file_uploader("上传一份同结构 CSV（可选）", type=["csv"])
+# 默认兜底：已聚合的小表（可选）
+DEFAULT_AGG = Path(__file__).parent / "data" / "hourly_trips.csv"
+up = st.file_uploader("上传原始或已聚合的 CSV（均可）", type=["csv"])
 
 def load_csv(src):
-    return pd.read_csv(src)
+    # 自动识别分隔符，容错好一些
+    return pd.read_csv(src, sep=None, engine="python")
 
 if up is not None:
-    df = load_csv(up)
-elif DEFAULT.exists():
-    df = load_csv(DEFAULT)
+    raw = load_csv(up)
+elif DEFAULT_AGG.exists():
+    raw = load_csv(DEFAULT_AGG)
 else:
-    st.info("未检测到默认数据。请上传一份 CSV（需包含列：**pickup_hour, trips**；可选 **avg_tip**）。")
+    st.info("请上传 CSV；若无原始数据，可先用示例的 hourly_trips.csv。")
     st.stop()
 
-# ============ 基础校验 & 类型处理 ============
-need = {"pickup_hour", "trips"}
-if not need.issubset(df.columns):
-    st.error("CSV 需包含列：pickup_hour, trips。可选列：avg_tip。")
-    st.stop()
+# ============ 原始/已聚合自适应 ============
+# 1) 候选的“时间戳列”、小费列名（按最常见命名覆盖）
+CANDIDATE_TIME_COLS = [
+    "tpep_pickup_datetime","pickup_datetime","pickup_time","pickup_ts",
+    "started_at","start_time","timestamp","datetime","date","time"
+]
+CANDIDATE_TIP_COLS = ["avg_tip","tip_amount","tip","tip_amt"]
 
-df["pickup_hour"] = pd.to_numeric(df["pickup_hour"], errors="coerce").astype("Int64")
-df["trips"] = pd.to_numeric(df["trips"], errors="coerce")
+def to_num(s):
+    return pd.to_numeric(s, errors="coerce")
+
+# 2) 如果是已聚合表：必须包含 pickup_hour, trips（avg_tip 可选）
+def is_aggregated(df):
+    return {"pickup_hour","trips"}.issubset(df.columns)
+
+def aggregate_hourly(df):
+    """
+    从原始明细聚合到小时级：
+    - 识别时间列 -> 取 hour
+    - trips = count
+    - 如存在小费列 -> avg_tip = mean
+    """
+    time_col = next((c for c in CANDIDATE_TIME_COLS if c in df.columns), None)
+    if time_col is None:
+        return None  # 识别失败，让上层报友好错误
+
+    ts = pd.to_datetime(df[time_col], errors="coerce")
+    out = pd.DataFrame({"pickup_hour": ts.dt.hour})
+    out["trips"] = 1
+
+    # 处理可选小费
+    tip_col = next((c for c in CANDIDATE_TIP_COLS if c in df.columns), None)
+    if tip_col:
+        df["_tip_num"] = to_num(df[tip_col])
+        out = pd.concat([out, df["_tip_num"]], axis=1)
+
+    if tip_col:
+        agg = out.groupby("pickup_hour", dropna=True).agg(
+            trips=("trips","sum"),
+            avg_tip=("_tip_num","mean")
+        ).reset_index()
+        agg["avg_tip"] = agg["avg_tip"].round(2)
+    else:
+        agg = out.groupby("pickup_hour", dropna=True).agg(
+            trips=("trips","sum")
+        ).reset_index()
+    agg = agg.dropna(subset=["pickup_hour"]).copy()
+    agg["pickup_hour"] = agg["pickup_hour"].astype(int)
+    return agg.sort_values("pickup_hour")
+
+# 3) 统一得到 df（小时级）
+if is_aggregated(raw):
+    df = raw.copy()
+    df["pickup_hour"] = to_num(df["pickup_hour"]).astype("Int64")
+    df["trips"] = to_num(df["trips"])
+    if "avg_tip" in df.columns:
+        df["avg_tip"] = to_num(df["avg_tip"])
+    df = df.dropna(subset=["pickup_hour","trips"]).copy()
+    df["pickup_hour"] = df["pickup_hour"].astype(int)
+    df = df.sort_values("pickup_hour")
+else:
+    df = aggregate_hourly(raw)
+    if df is None:
+        st.error("CSV 需包含：原始数据里的**时间戳列**（如 timestamp/pickup_datetime/started_at）"
+                 "；或已聚合表的列 **pickup_hour, trips**（可选 avg_tip）。\n\n"
+                 "若你用的是我给的原始样例，请确认第一行包含列名且时间列名为 `timestamp`。")
+        st.stop()
+
+# ============ 基础校验 & 类型处理（最终保险） ============
 has_tip = "avg_tip" in df.columns
+df["pickup_hour"] = pd.to_numeric(df["pickup_hour"], errors="coerce").astype(int)
+df["trips"] = pd.to_numeric(df["trips"], errors="coerce")
 if has_tip:
-    df["avg_tip"] = pd.to_numeric(df.get("avg_tip"), errors="coerce")
+    df["avg_tip"] = pd.to_numeric(df["avg_tip"], errors="coerce")
 
-df = df.dropna(subset=["pickup_hour", "trips"]).copy()
-df["pickup_hour"] = df["pickup_hour"].astype(int)
+df = df.dropna(subset=["pickup_hour","trips"]).copy()
+df = df[(df["pickup_hour"] >= 0) & (df["pickup_hour"] <= 23)].sort_values("pickup_hour")
 
-# ============ 侧边栏：筛选、说明、重置（修复首次滑动回跳） ============
+# ============ 侧边栏：筛选、说明、重置（不会回跳） ============
 with st.sidebar:
     st.subheader("筛选")
 
     DEFAULT_RANGE = (0, 23)
-    # 初始化会话状态（只在首次进入时设置一次）
     if "hour_range" not in st.session_state:
         st.session_state["hour_range"] = DEFAULT_RANGE
 
-    # 绑定固定 key：第一次拖动就能记住，不会回跳
     hour_range = st.slider(
         "展示小时范围", 0, 23,
         value=st.session_state["hour_range"],
@@ -60,9 +123,7 @@ with st.sidebar:
     smooth   = st.checkbox("显示移动平均（3小时）", value=False)
 
     st.divider()
-    st.markdown("**使用说明**\n- 上传同结构 CSV 可即时更新\n- 勾选占比/平滑观察不同视图\n- 下面按钮可一键重置")
-
-    # 用回调修改同名 key，避免同轮渲染直接覆写控件值导致的异常/回跳
+    st.markdown("**使用说明**\n- 可上传原始明细或已聚合表\n- 勾选占比/平滑观察不同视图\n- 下面按钮一键重置")
     def reset_range():
         st.session_state["hour_range"] = DEFAULT_RANGE
     st.button("重置筛选为 0–23 点", on_click=reset_range)
@@ -70,7 +131,6 @@ with st.sidebar:
 # 过滤 & 排序
 view = df[(df["pickup_hour"] >= hr_min) & (df["pickup_hour"] <= hr_max)].copy()
 view = view.sort_values("pickup_hour")
-
 if len(view) == 0:
     st.warning("当前筛选范围内没有数据，请调整滑块或上传其他 CSV。")
     st.stop()
@@ -83,7 +143,7 @@ if show_pct:
 if smooth and len(view) >= 3:
     view["trips_sma3"] = view["trips"].rolling(3, center=True).mean()
 
-# ============ KPI（用 loc 取峰值，避免索引越界；空/NaN 兜底） ============
+# ============ KPI ============
 if view["trips"].notna().any():
     peak_row = view.loc[view["trips"].idxmax()]
     peak_hour = int(peak_row["pickup_hour"])
@@ -97,14 +157,12 @@ c1.metric("总行程数", f"{int(total):,}")
 c2.metric("最忙时段", f"{peak_hour:02d}:00", f"{peak_trips:,}")
 c3.metric("峰值占比", f"{peak_share:.2f}%")
 
-# ============ 图表区域：Tabs ============
+# ============ 图表区域 ============
 tab1, tab2, tab3 = st.tabs(["数量/占比", "平均小费", "数据概览"])
 
 with tab1:
-    # 主图：数量/占比 & 峰值高亮
     if show_pct and total > 0:
-        ycol = "share"
-        y_label = "占比(%)"
+        ycol = "share"; y_label = "占比(%)"
     else:
         ycol = "trips_sma3" if (smooth and "trips_sma3" in view.columns) else "trips"
         y_label = "数量"
@@ -112,7 +170,6 @@ with tab1:
     colors = ["#E45756" if int(h) == peak_hour else "#4C78A8" for h in view["pickup_hour"]]
     fig = px.bar(view, x="pickup_hour", y=ycol, labels={"pickup_hour":"小时", ycol: y_label})
     fig.update_traces(marker_color=colors, hovertemplate="小时=%{x}<br>"+y_label+"=%{y}<extra></extra>")
-    # 注：取注释用的 y 值时，确保筛选过的列存在
     ann_y = view.loc[view["pickup_hour"] == peak_hour, ycol].iloc[0] if peak_trips > 0 else None
     if ann_y is not None:
         fig.add_annotation(x=peak_hour, y=ann_y, text="峰值", showarrow=True, arrowhead=2, yshift=10)
