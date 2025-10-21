@@ -6,8 +6,8 @@ from pathlib import Path
 
 # ============ 页面基础 ============
 st.set_page_config(page_title="24小时出行面板", layout="wide")
-st.title("按小时聚合展示")
-st.caption("平台（Kaggle/PySpark）可先做聚合；本页也支持读取原始明细并现场聚合到小时级。")
+st.title("24小时出行面板")
+st.caption("平台（Kaggle/PySpark）可先做聚合；也支持读取原始明细并现场聚合到小时级。")
 
 # ============ 数据加载：上传优先 → 默认兜底 → 提示 ============
 # 默认兜底：已聚合的小表（可选）
