@@ -9,69 +9,20 @@ st.set_page_config(page_title="按小时聚合展示", layout="wide")
 st.title("按小时聚合展示")
 st.caption("平台（Kaggle/PySpark）先做聚合 → 前端只做筛选/占比/平滑等轻计算，保证演示稳定。")
 
-# ---------- 数据加载：上传优先；无则读默认；都没有则提示 ----------
-from pathlib import Path
-import pandas as pd
-import streamlit as st
-
+# ============ 数据加载：上传优先 → 默认兜底 → 提示 ============
 DEFAULT = Path(__file__).parent / "data" / "hourly_trips.csv"
-up = st.file_uploader("上传原始或已聚合的 CSV（均可）", type=["csv"])
+up = st.file_uploader("上传一份同结构 CSV（可选）", type=["csv"])
 
 def load_csv(src):
     return pd.read_csv(src)
 
 if up is not None:
-    raw = load_csv(up)
+    df = load_csv(up)
 elif DEFAULT.exists():
-    raw = load_csv(DEFAULT)
+    df = load_csv(DEFAULT)
 else:
-    st.info("请上传 CSV；若无原始数据，可先用示例的 hourly_trips.csv。")
+    st.info("未检测到默认数据。请上传一份 CSV（需包含列：**pickup_hour, trips**；可选 **avg_tip**）。")
     st.stop()
-
-# ---------- 尝试自动识别“时间戳列”，能识别就现场聚合 ----------
-CANDIDATE_TIME_COLS = [
-    "tpep_pickup_datetime","pickup_datetime","started_at","start_time",
-    "timestamp","datetime","time","date"
-]
-time_col = next((c for c in CANDIDATE_TIME_COLS if c in raw.columns), None)
-
-def as_num(s):
-    return pd.to_numeric(s, errors="coerce")
-
-if time_col is not None:
-    # 现场聚合（原始明细 -> 小时级）
-    ts = pd.to_datetime(raw[time_col], errors="coerce")
-    df = pd.DataFrame({
-        "pickup_hour": ts.dt.hour
-    })
-    df["trips"] = 1
-    # 如果存在小费/金额列，给出 avg_tip（可选）
-    tip_col = next((c for c in ["tip_amount","tip","avg_tip"] if c in raw.columns), None)
-    if tip_col:
-        raw["_tip_num"] = as_num(raw[tip_col])
-        df = df.join(raw["_tip_num"])
-        agg = df.groupby("pickup_hour", dropna=True).agg(
-            trips=("trips","sum"),
-            avg_tip=("_tip_num","mean")
-        ).reset_index()
-        agg["avg_tip"] = agg["avg_tip"].round(2)
-    else:
-        agg = df.groupby("pickup_hour", dropna=True).agg(trips=("trips","sum")).reset_index()
-    df = agg.sort_values("pickup_hour")
-else:
-    # 视为已聚合：要求至少有 pickup_hour, trips
-    need = {"pickup_hour","trips"}
-    if not need.issubset(raw.columns):
-        st.error("未检测到时间列；若为已聚合表，请至少包含列：pickup_hour, trips。可选：avg_tip。")
-        st.stop()
-    df = raw.copy()
-    df["pickup_hour"] = as_num(df["pickup_hour"]).astype("Int64")
-    df["trips"] = as_num(df["trips"])
-    if "avg_tip" in df.columns:
-        df["avg_tip"] = as_num(df["avg_tip"])
-    df = df.dropna(subset=["pickup_hour","trips"]).copy()
-    df["pickup_hour"] = df["pickup_hour"].astype(int)
-    df = df.sort_values("pickup_hour")
 
 # ============ 基础校验 & 类型处理 ============
 need = {"pickup_hour", "trips"}
@@ -88,14 +39,21 @@ if has_tip:
 df = df.dropna(subset=["pickup_hour", "trips"]).copy()
 df["pickup_hour"] = df["pickup_hour"].astype(int)
 
-# ============ 侧边栏：筛选、说明、重置（修复重置崩溃） ============
+# ============ 侧边栏：筛选、说明、重置（修复首次滑动回跳） ============
 with st.sidebar:
     st.subheader("筛选")
 
     DEFAULT_RANGE = (0, 23)
-    hour_range = st.session_state.get("hour_range", DEFAULT_RANGE)
-    hour_range = st.slider("展示小时范围", 0, 23, hour_range)
-    st.session_state["hour_range"] = hour_range
+    # 初始化会话状态（只在首次进入时设置一次）
+    if "hour_range" not in st.session_state:
+        st.session_state["hour_range"] = DEFAULT_RANGE
+
+    # 绑定固定 key：第一次拖动就能记住，不会回跳
+    hour_range = st.slider(
+        "展示小时范围", 0, 23,
+        value=st.session_state["hour_range"],
+        key="hour_range"
+    )
     hr_min, hr_max = hour_range
 
     show_pct = st.checkbox("显示占比（% of total）", value=False)
@@ -103,9 +61,11 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**使用说明**\n- 上传同结构 CSV 可即时更新\n- 勾选占比/平滑观察不同视图\n- 下面按钮可一键重置")
-    if st.button("重置筛选为 0–23 点"):
+
+    # 用回调修改同名 key，避免同轮渲染直接覆写控件值导致的异常/回跳
+    def reset_range():
         st.session_state["hour_range"] = DEFAULT_RANGE
-        st.rerun()
+    st.button("重置筛选为 0–23 点", on_click=reset_range)
 
 # 过滤 & 排序
 view = df[(df["pickup_hour"] >= hr_min) & (df["pickup_hour"] <= hr_max)].copy()
@@ -117,8 +77,8 @@ if len(view) == 0:
 
 # ============ 派生：占比/平滑 ============
 total = float(view["trips"].sum())
-if show_pct and total > 0:
-    view["share"] = (view["trips"] / total * 100).round(2)
+if show_pct:
+    view["share"] = (view["trips"] / total * 100).round(2) if total > 0 else 0.0
 
 if smooth and len(view) >= 3:
     view["trips_sma3"] = view["trips"].rolling(3, center=True).mean()
@@ -152,9 +112,10 @@ with tab1:
     colors = ["#E45756" if int(h) == peak_hour else "#4C78A8" for h in view["pickup_hour"]]
     fig = px.bar(view, x="pickup_hour", y=ycol, labels={"pickup_hour":"小时", ycol: y_label})
     fig.update_traces(marker_color=colors, hovertemplate="小时=%{x}<br>"+y_label+"=%{y}<extra></extra>")
-    if peak_trips > 0:
-        fig.add_annotation(x=peak_hour, y=view.loc[view["pickup_hour"]==peak_hour, ycol].iloc[0],
-                           text="峰值", showarrow=True, arrowhead=2, yshift=10)
+    # 注：取注释用的 y 值时，确保筛选过的列存在
+    ann_y = view.loc[view["pickup_hour"] == peak_hour, ycol].iloc[0] if peak_trips > 0 else None
+    if ann_y is not None:
+        fig.add_annotation(x=peak_hour, y=ann_y, text="峰值", showarrow=True, arrowhead=2, yshift=10)
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
