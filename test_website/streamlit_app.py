@@ -1,4 +1,4 @@
-# streamlit_app.py  —— 方案A（用户可配置主题颜色）
+# streamlit_app.py —— 合并版（侧边栏可见 & 显眼开关 + 主题模板/单项修改 + 原有功能）
 import os
 import streamlit as st
 import pandas as pd
@@ -6,16 +6,15 @@ import numpy as np
 import plotly.express as px
 from html import escape
 
-# ---------- 兼容 toml 解析 ----------
-try:
-    import tomllib  # Py3.11+
-except ModuleNotFoundError:
-    import tomli as tomllib  # Py3.10 及以下
+# ---------- 页面基础：默认展开侧边栏 ----------
+st.set_page_config(
+    page_title="数据聚合处理网站",
+    page_icon="🧮",
+    layout="wide",
+    initial_sidebar_state="expanded"  # ✅ 无论是否有文件，都默认展开侧边栏
+)
 
-# ---------- 页面基础 ----------
-st.set_page_config(page_title="数据聚合处理网站", page_icon="🧮", layout="wide")
-
-# ---------- 轻量 CSS：紧凑布局 + 柔和阴影（不占空间） ----------
+# ---------- 轻量 CSS：紧凑布局 + 显眼的侧边栏开关 ----------
 def apply_compact_css():
     st.markdown("""
     <style>
@@ -28,24 +27,54 @@ def apply_compact_css():
       }
       .stDownloadButton > button { border-radius:10px; }
       .modebar { filter: opacity(75%); }
+
+      /* 让右上角的侧边栏开关更显眼 */
+      [data-testid="collapsedControl"], 
+      button[title="Toggle sidebar"],
+      button[kind="header"] {
+        position: relative !important;
+        z-index: 999;
+      }
+      [data-testid="collapsedControl"] > div,
+      button[title="Toggle sidebar"],
+      button[kind="header"] {
+        background: rgba(46, 144, 250, .15) !important;
+        border-radius: 999px !important;
+        padding: 6px 8px !important;
+        box-shadow: 0 0 0 2px rgba(46, 144, 250, .25);
+        animation: glow 2.6s ease-in-out infinite;
+      }
+      [data-testid="collapsedControl"] svg, 
+      button[title="Toggle sidebar"] svg,
+      button[kind="header"] svg {
+        transform: scale(1.15);
+      }
+      @keyframes glow {
+        0%   { box-shadow: 0 0 0 2px rgba(46,144,250,.25); }
+        50%  { box-shadow: 0 0 0 5px rgba(46,144,250,.35); }
+        100% { box-shadow: 0 0 0 2px rgba(46,144,250,.25); }
+      }
     </style>
     """, unsafe_allow_html=True)
 
 apply_compact_css()
 
-# ---------- 主题A：从 theme_user.toml 读取 + 运行时覆盖 ----------
+# ---------- 主题：从 theme_user.toml 读取 + 运行时覆盖 ----------
+try:
+    import tomllib  # Py3.11+
+except ModuleNotFoundError:
+    import tomli as tomllib  # Py3.10 及以下
+
 DEFAULT_THEME = {
     "primaryColor": "#4C78A8",
     "backgroundColor": "#FFFFFF",
     "secondaryBackgroundColor": "#F6F8FB",
     "textColor": "#1F2937",
-    # 下两项是图表专用的颜色（非 Streamlit 内置）
     "barColor": "#4C78A8",
     "peakColor": "#E45756",
 }
 
 def load_user_theme():
-    """从可选路径读取 theme_user.toml（不存在则用默认）"""
     theme = DEFAULT_THEME.copy()
     for p in ("theme_user.toml", "data/theme_user.toml", ".streamlit/theme_user.toml"):
         if os.path.exists(p):
@@ -59,7 +88,6 @@ def load_user_theme():
     return theme
 
 def apply_theme_css(theme: dict):
-    """用 CSS 在运行时覆盖颜色（无需重启，且不改变布局）"""
     st.markdown(f"""
     <style>
       .stApp {{
@@ -80,43 +108,117 @@ def apply_theme_css(theme: dict):
 THEME = load_user_theme()
 apply_theme_css(THEME)
 
-# 将图表颜色写入会话（便于侧栏修改后全局使用）
+# 图表颜色存入会话
 if "BAR_COLOR" not in st.session_state:
     st.session_state["BAR_COLOR"] = THEME.get("barColor", "#4C78A8")
 if "PEAK_COLOR" not in st.session_state:
     st.session_state["PEAK_COLOR"] = THEME.get("peakColor", "#E45756")
 
-# ---------- 图表统一风格 ----------
-def style_bar(fig, x_col, y_col, peak_x=None, title=None):
-    fig.update_layout(
-        template="plotly_white",
-        title=dict(text=title or "", x=0.0, xanchor="left", y=0.95, font=dict(size=18)),
-        margin=dict(l=10, r=10, t=35, b=0),
-        xaxis=dict(title="", showgrid=False, zeroline=False),
-        yaxis=dict(title="", gridcolor="rgba(0,0,0,0.06)", zeroline=False),
-        hovermode="x unified",
-        font=dict(size=13),
-    )
-    if peak_x is not None:
-        fig.add_vline(x=peak_x, line_width=1, line_dash="dot", line_color=st.session_state["PEAK_COLOR"])
-        try:
-            ymax = float(pd.Series(fig.data[0].y).max())
-        except Exception:
-            ymax = None
-        fig.add_annotation(
-            x=peak_x, y=ymax,
-            text="峰值", showarrow=True, arrowhead=2, ax=20, ay=-30,
-            font=dict(color=st.session_state["PEAK_COLOR"]),
-            arrowcolor=st.session_state["PEAK_COLOR"],
-            bgcolor="rgba(255,255,255,.7)"
-        )
-    return fig
+# ---------- 主题模板与单项修改控件 ----------
+PRESET_THEMES = {
+    "Calm Blue（清爽蓝）": {
+        "primaryColor": "#4C78A8",
+        "backgroundColor": "#FFFFFF",
+        "secondaryBackgroundColor": "#F6F8FB",
+        "textColor": "#1F2937",
+        "barColor": "#4C78A8",
+        "peakColor": "#E45756",
+    },
+    "Dark Slate（暗黑冷灰）": {
+        "primaryColor": "#60A5FA",
+        "backgroundColor": "#0B1220",
+        "secondaryBackgroundColor": "#111827",
+        "textColor": "#E5E7EB",
+        "barColor": "#60A5FA",
+        "peakColor": "#F87171",
+    },
+    "Ocean Breeze（海蓝清新）": {
+        "primaryColor": "#0EA5E9",
+        "backgroundColor": "#F8FAFC",
+        "secondaryBackgroundColor": "#EFF6FF",
+        "textColor": "#0F172A",
+        "barColor": "#0284C7",
+        "peakColor": "#F59E0B",
+    },
+    "Warm Sunset（暖色橙光）": {
+        "primaryColor": "#F97316",
+        "backgroundColor": "#FFFDF9",
+        "secondaryBackgroundColor": "#FFF3E8",
+        "textColor": "#1F2937",
+        "barColor": "#F97316",
+        "peakColor": "#DC2626",
+    },
+    "Graphite Violet（石墨紫）": {
+        "primaryColor": "#8B5CF6",
+        "backgroundColor": "#1F2430",
+        "secondaryBackgroundColor": "#2B3140",
+        "textColor": "#E5E7EB",
+        "barColor": "#8B5CF6",
+        "peakColor": "#F97316",
+    },
+}
 
-def chips(items):
-    return " ".join([
-        f"<span style='background:#eef2ff;color:#3730a3;border-radius:12px;padding:2px 8px;margin-right:6px;font-size:12px'>{escape(str(i))}</span>"
-        for i in items
-    ])
+def _theme_toml_text(theme: dict, bar: str, peak: str) -> str:
+    keys = ["primaryColor","backgroundColor","secondaryBackgroundColor","textColor","barColor","peakColor"]
+    kv = {**theme, "barColor": bar, "peakColor": peak}
+    return "[theme]\n" + "\n".join(f'{k}="{kv[k]}"' for k in keys)
+
+def theme_controls(theme: dict):
+    with st.sidebar.expander("🎨 主题设置", expanded=False):
+        mode = st.radio("方式", ["选择模板", "单项修改"], horizontal=True)
+
+        if mode == "选择模板":
+            preset = st.selectbox("主题模板", list(PRESET_THEMES.keys()))
+            c1, c2 = st.columns([1,1])
+            if c1.button("应用模板", use_container_width=True):
+                p = PRESET_THEMES[preset]
+                for k in ["primaryColor","backgroundColor","secondaryBackgroundColor","textColor"]:
+                    theme[k] = p[k]
+                st.session_state["BAR_COLOR"]  = p["barColor"]
+                st.session_state["PEAK_COLOR"] = p["peakColor"]
+                st.success(f"已应用：{preset}")
+                apply_theme_css(theme)
+            st.download_button(
+                "下载该模板为 theme_user.toml",
+                _theme_toml_text(PRESET_THEMES[preset], PRESET_THEMES[preset]["barColor"], PRESET_THEMES[preset]["peakColor"]).encode("utf-8"),
+                file_name="theme_user.toml",
+                mime="text/plain",
+                use_container_width=True
+            )
+        else:
+            items = st.multiselect(
+                "选择要修改的项",
+                ["primaryColor","backgroundColor","secondaryBackgroundColor","textColor","barColor","peakColor"]
+            )
+            cols = st.columns(2)
+            for i, k in enumerate(items):
+                if k in ["barColor","peakColor"]:
+                    default = st.session_state["BAR_COLOR"] if k=="barColor" else st.session_state["PEAK_COLOR"]
+                    new = cols[i%2].color_picker(k, default)
+                    if k == "barColor":
+                        st.session_state["BAR_COLOR"] = new
+                    else:
+                        st.session_state["PEAK_COLOR"] = new
+                else:
+                    new = cols[i%2].color_picker(k, theme.get(k, DEFAULT_THEME[k]))
+                    theme[k] = new
+            apply_theme_css(theme)
+            st.download_button(
+                "下载当前主题为 theme_user.toml",
+                _theme_toml_text(theme, st.session_state["BAR_COLOR"], st.session_state["PEAK_COLOR"]).encode("utf-8"),
+                file_name="theme_user.toml",
+                mime="text/plain",
+                use_container_width=True
+            )
+    return theme
+
+# 先渲染一个“基础侧边栏”（即使没有文件也可见）
+with st.sidebar:
+    st.subheader("🎛 面板")
+    st.caption("右上角按钮可展开/收起侧栏。上传 CSV 后解锁“维度与度量”。")
+
+# 主题控件总是可用（不依赖数据）
+THEME = theme_controls(THEME)
 
 # ---------- 顶部 ----------
 st.title("数据聚合处理网站")
@@ -124,10 +226,17 @@ st.caption("用户自选横/纵坐标 · 时间列可派生（小时/日期/星�
 
 # ---------- 上传 CSV ----------
 up = st.file_uploader("上传 CSV（原始明细或已聚合均可）", type=["csv"])
+
 def read_csv_any(src):
     return pd.read_csv(src, sep=None, engine="python")
 
+# 侧边栏“维度与度量”标题总出现；无文件时仅提示
+with st.sidebar:
+    st.subheader("维度与度量")
+
 if up is None:
+    with st.sidebar:
+        st.info("请先上传 CSV 解锁这里的设置。")
     st.info("请上传 CSV 文件以开始分析。")
     st.stop()
 
@@ -159,10 +268,8 @@ def is_numeric_like(series) -> bool:
 datetime_candidates = [c for c in raw.columns if can_parse_datetime(raw[c]) > 0.5]
 numeric_candidates  = [c for c in raw.columns if is_numeric_like(raw[c])]
 
-# ---------- 侧边栏：维度与度量 ----------
+# ---------- 侧边栏：真正的数据依赖控件 ----------
 with st.sidebar:
-    st.subheader("维度与度量")
-
     x_col = st.selectbox(
         "横坐标 (X) 🌐",
         options=list(raw.columns),
@@ -195,32 +302,6 @@ with st.sidebar:
         index=0,
         disabled=(len(y_cols) == 0)
     )
-
-# ---------- 侧边栏：主题颜色（运行时生效，可下载 theme_user.toml） ----------
-with st.sidebar.expander("🎨 主题颜色（本次会话）", expanded=False):
-    c1, c2 = st.columns(2)
-    THEME["primaryColor"] = c1.color_picker("主色 primary", THEME["primaryColor"])
-    THEME["backgroundColor"] = c2.color_picker("背景 background", THEME["backgroundColor"])
-    c3, c4 = st.columns(2)
-    THEME["secondaryBackgroundColor"] = c3.color_picker("侧栏 secondary", THEME["secondaryBackgroundColor"])
-    THEME["textColor"] = c4.color_picker("文字 text", THEME["textColor"])
-    c5, c6 = st.columns(2)
-    st.session_state["BAR_COLOR"]  = c5.color_picker("柱色 barColor",  st.session_state["BAR_COLOR"])
-    st.session_state["PEAK_COLOR"] = c6.color_picker("峰值 peakColor", st.session_state["PEAK_COLOR"])
-
-    # 即时应用
-    apply_theme_css(THEME)
-
-    # 允许下载可持久化的主题文件
-    toml_text = "[theme]\n" + "\n".join(
-        f'{k}="{v}"' for k, v in {
-            **THEME,
-            "barColor": st.session_state["BAR_COLOR"],
-            "peakColor": st.session_state["PEAK_COLOR"],
-        }.items()
-    )
-    st.download_button("下载 theme_user.toml", toml_text.encode("utf-8"),
-                       file_name="theme_user.toml", mime="text/plain")
 
 # ---------- 构造分组键（含时间派生） ----------
 df = raw.copy()
@@ -300,6 +381,38 @@ with st.sidebar:
         cats = list(pd.unique(x_vals.astype("string")))
         chosen = st.multiselect("选择 X 类别", options=cats, default=cats)
         df_view = df_view[df_view[x_col].astype("string").isin(chosen)]
+
+# ---------- 图表风格与小工具 ----------
+def style_bar(fig, x_col, y_col, peak_x=None, title=None):
+    fig.update_layout(
+        template="plotly_white",
+        title=dict(text=title or "", x=0.0, xanchor="left", y=0.95, font=dict(size=18)),
+        margin=dict(l=10, r=10, t=35, b=0),
+        xaxis=dict(title="", showgrid=False, zeroline=False),
+        yaxis=dict(title="", gridcolor="rgba(0,0,0,0.06)", zeroline=False),
+        hovermode="x unified",
+        font=dict(size=13),
+    )
+    if peak_x is not None:
+        fig.add_vline(x=peak_x, line_width=1, line_dash="dot", line_color=st.session_state["PEAK_COLOR"])
+        try:
+            ymax = float(pd.Series(fig.data[0].y).max())
+        except Exception:
+            ymax = None
+        fig.add_annotation(
+            x=peak_x, y=ymax,
+            text="峰值", showarrow=True, arrowhead=2, ax=20, ay=-30,
+            font=dict(color=st.session_state["PEAK_COLOR"]),
+            arrowcolor=st.session_state["PEAK_COLOR"],
+            bgcolor="rgba(255,255,255,.7)"
+        )
+    return fig
+
+def chips(items):
+    return " ".join([
+        f"<span style='background:#eef2ff;color:#3730a3;border-radius:12px;padding:2px 8px;margin-right:6px;font-size:12px'>{escape(str(i))}</span>"
+        for i in items
+    ])
 
 # ---------- 顶部描述 ----------
 st.subheader(f"按「{x_col}」聚合（{agg_fn}）")
