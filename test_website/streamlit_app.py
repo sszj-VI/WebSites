@@ -50,16 +50,21 @@ def apply_compact_css():
         100% { box-shadow: 0 0 0 2px rgba(76,120,168,.28); }
       }
 
-      /* —— 固定渐变侧边条带（不占空间，不遮挡点击） —— */
-      .stApp { position: relative; }
-      .stApp::before, .stApp::after {
-        content: ""; position: fixed; top: 0; height: 100vh; width: 14px;
-        pointer-events: none; z-index: 0; opacity: .85;
-        /* 适度柔和的双向渐变 */
-        background: linear-gradient(180deg, rgba(76,120,168,.35) 0%, rgba(229,87,86,.35) 100%);
-      }
-      .stApp::before { left: 0; }
-      .stApp::after  { right: 0; background: linear-gradient(180deg, rgba(229,87,86,.35) 0%, rgba(76,120,168,.35) 100%); }
+      /* —— 安全版：用背景画两侧渐变条带，不用伪元素 —— */
+.stApp{
+  /* 基础背景色 */
+  background-color: #ffffff !important;
+
+  /* 左侧条带、右侧条带：两张背景图叠加 */
+  background-image:
+    linear-gradient(180deg, rgba(76,120,168,.35), rgba(229,87,86,.35)),
+    linear-gradient(180deg, rgba(229,87,86,.35), rgba(76,120,168,.35));
+  background-repeat: no-repeat, no-repeat;
+  background-position: left top, right top;
+  background-size: 14px 100vh, 14px 100vh;   /* 条带宽度 × 视口高度 */
+  background-attachment: fixed, fixed;       /* 固定在两侧，不随滚动抖动 */
+}
+
       /* 在有侧边栏时，条带自然位于侧边栏下方，不影响交互 */
     </style>
     """, unsafe_allow_html=True)
