@@ -1,3 +1,4 @@
+# test_website/streamlit_app.py
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -20,8 +21,7 @@ if up is not None:
 elif DEFAULT.exists():
     df = load_csv(DEFAULT)
 else:
-    with st.container():
-        st.info("未检测到默认数据。请上传一份 CSV（需包含列：**pickup_hour, trips**；可选 **avg_tip**）。")
+    st.info("未检测到默认数据。请上传一份 CSV（需包含列：**pickup_hour, trips**；可选 **avg_tip**）。")
     st.stop()
 
 # ============ 基础校验 & 类型处理 ============
@@ -39,20 +39,23 @@ if has_tip:
 df = df.dropna(subset=["pickup_hour", "trips"]).copy()
 df["pickup_hour"] = df["pickup_hour"].astype(int)
 
-# ============ 侧边栏：筛选、说明、重置 ============
+# ============ 侧边栏：筛选、说明、重置（修复重置崩溃） ============
 with st.sidebar:
     st.subheader("筛选")
-    if "hour_range" not in st.session_state:
-        st.session_state["hour_range"] = (0, 23)
-    hr_min, hr_max = st.slider("展示小时范围", 0, 23, st.session_state["hour_range"], key="hour_range")
+
+    DEFAULT_RANGE = (0, 23)
+    hour_range = st.session_state.get("hour_range", DEFAULT_RANGE)
+    hour_range = st.slider("展示小时范围", 0, 23, hour_range)
+    st.session_state["hour_range"] = hour_range
+    hr_min, hr_max = hour_range
+
     show_pct = st.checkbox("显示占比（% of total）", value=False)
     smooth   = st.checkbox("显示移动平均（3小时）", value=False)
 
     st.divider()
-    st.markdown("**使用说明**")
-    st.markdown("- 上传一份同结构 CSV 可即时更新图表\n- 勾选“占比/平滑”观察不同视图\n- 下面按钮可一键重置")
+    st.markdown("**使用说明**\n- 上传同结构 CSV 可即时更新\n- 勾选占比/平滑观察不同视图\n- 下面按钮可一键重置")
     if st.button("重置筛选为 0–23 点"):
-        st.session_state["hour_range"] = (0, 23)
+        st.session_state["hour_range"] = DEFAULT_RANGE
         st.rerun()
 
 # 过滤 & 排序
