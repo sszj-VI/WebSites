@@ -9,20 +9,69 @@ st.set_page_config(page_title="按小时聚合展示", layout="wide")
 st.title("按小时聚合展示")
 st.caption("平台（Kaggle/PySpark）先做聚合 → 前端只做筛选/占比/平滑等轻计算，保证演示稳定。")
 
-# ============ 数据加载：上传优先 → 默认兜底 → 提示 ============
+# ---------- 数据加载：上传优先；无则读默认；都没有则提示 ----------
+from pathlib import Path
+import pandas as pd
+import streamlit as st
+
 DEFAULT = Path(__file__).parent / "data" / "hourly_trips.csv"
-up = st.file_uploader("上传一份同结构 CSV（可选）", type=["csv"])
+up = st.file_uploader("上传原始或已聚合的 CSV（均可）", type=["csv"])
 
 def load_csv(src):
     return pd.read_csv(src)
 
 if up is not None:
-    df = load_csv(up)
+    raw = load_csv(up)
 elif DEFAULT.exists():
-    df = load_csv(DEFAULT)
+    raw = load_csv(DEFAULT)
 else:
-    st.info("未检测到默认数据。请上传一份 CSV（需包含列：**pickup_hour, trips**；可选 **avg_tip**）。")
+    st.info("请上传 CSV；若无原始数据，可先用示例的 hourly_trips.csv。")
     st.stop()
+
+# ---------- 尝试自动识别“时间戳列”，能识别就现场聚合 ----------
+CANDIDATE_TIME_COLS = [
+    "tpep_pickup_datetime","pickup_datetime","started_at","start_time",
+    "timestamp","datetime","time","date"
+]
+time_col = next((c for c in CANDIDATE_TIME_COLS if c in raw.columns), None)
+
+def as_num(s):
+    return pd.to_numeric(s, errors="coerce")
+
+if time_col is not None:
+    # 现场聚合（原始明细 -> 小时级）
+    ts = pd.to_datetime(raw[time_col], errors="coerce")
+    df = pd.DataFrame({
+        "pickup_hour": ts.dt.hour
+    })
+    df["trips"] = 1
+    # 如果存在小费/金额列，给出 avg_tip（可选）
+    tip_col = next((c for c in ["tip_amount","tip","avg_tip"] if c in raw.columns), None)
+    if tip_col:
+        raw["_tip_num"] = as_num(raw[tip_col])
+        df = df.join(raw["_tip_num"])
+        agg = df.groupby("pickup_hour", dropna=True).agg(
+            trips=("trips","sum"),
+            avg_tip=("_tip_num","mean")
+        ).reset_index()
+        agg["avg_tip"] = agg["avg_tip"].round(2)
+    else:
+        agg = df.groupby("pickup_hour", dropna=True).agg(trips=("trips","sum")).reset_index()
+    df = agg.sort_values("pickup_hour")
+else:
+    # 视为已聚合：要求至少有 pickup_hour, trips
+    need = {"pickup_hour","trips"}
+    if not need.issubset(raw.columns):
+        st.error("未检测到时间列；若为已聚合表，请至少包含列：pickup_hour, trips。可选：avg_tip。")
+        st.stop()
+    df = raw.copy()
+    df["pickup_hour"] = as_num(df["pickup_hour"]).astype("Int64")
+    df["trips"] = as_num(df["trips"])
+    if "avg_tip" in df.columns:
+        df["avg_tip"] = as_num(df["avg_tip"])
+    df = df.dropna(subset=["pickup_hour","trips"]).copy()
+    df["pickup_hour"] = df["pickup_hour"].astype(int)
+    df = df.sort_values("pickup_hour")
 
 # ============ 基础校验 & 类型处理 ============
 need = {"pickup_hour", "trips"}
