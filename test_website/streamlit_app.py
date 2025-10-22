@@ -15,36 +15,87 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------------- 轻量样式（含两侧黄→蓝渐变、更显眼的侧栏开关） ----------------
+# ---------------- 样式：超浅蓝竖向渐变背景 + 两侧装饰条 + 原生按钮兜底 ----------------
 def apply_compact_css():
     st.markdown("""
     <style>
+      /* 主容器紧凑一些 */
       .block-container { padding-top: 1.2rem; padding-bottom: 1.2rem; }
       section[data-testid="stSidebar"] { padding-top: .6rem !important; }
       .modebar { filter: opacity(75%); }
-      [data-testid="collapsedControl"], button[title="Toggle sidebar"] {
-        position: relative !important; z-index: 999;
+
+      /* 原生开关尽量可见（兜底） */
+      [data-testid="collapsedControl"]{
+        display:flex !important; opacity:1 !important; visibility:visible !important;
+        z-index:9999 !important;
         background: rgba(76,120,168,.18) !important;
         border-radius: 999px !important; padding: 6px 8px !important;
         box-shadow: 0 0 0 2px rgba(76,120,168,.28);
       }
+
+      /* 背景：超浅蓝竖向渐变 + 左右装饰条（黄→蓝） */
       .stApp{
-        background-color:#fff !important;
+        background-color:#ffffff !important;
         background-image:
+          /* 顶部到底部的超浅蓝渐变（尽量淡） */
+          linear-gradient(180deg, rgba(233,246,255,.85) 0%,
+                                   rgba(255,255,255,.94) 40%,
+                                   rgba(233,246,255,.85) 100%),
+          /* 左侧装饰条 */
           linear-gradient(180deg, rgba(245,158,11,.42) 0%, rgba(37,99,235,.42) 100%),
+          /* 右侧装饰条 */
           linear-gradient(180deg, rgba(245,158,11,.42) 0%, rgba(37,99,235,.42) 100%);
-        background-repeat: no-repeat,no-repeat;
-        background-position: left top, right top;
-        background-size: 24px 100vh, 24px 100vh;
-        background-attachment: fixed,fixed;
+        background-repeat: no-repeat, no-repeat, no-repeat;
+        background-position: center top, left top, right top;
+        background-size: 100% 100%, 28px 100vh, 28px 100vh;  /* 装饰条加宽到 28px */
+        background-attachment: fixed, fixed, fixed;
       }
+
       .file-badge{
         display:inline-block;background:#eef2ff;color:#3730a3;border-radius:10px;
         padding:3px 8px;margin:0 6px;font-size:12px
       }
     </style>
     """, unsafe_allow_html=True)
+
+# 永远存在的悬浮开关（无论原生开关是否渲染都可用）
+def mount_fixed_sidebar_toggle():
+    import streamlit.components.v1 as components
+    components.html("""
+    <style>
+      #perma-toggle{
+        position: fixed; left: 12px; top: 12px; z-index: 10000;
+        border-radius: 999px; padding: 6px 10px;
+        border: 1px solid rgba(0,0,0,.08);
+        background: #ffffffcc; backdrop-filter: blur(4px);
+        box-shadow: 0 4px 10px rgba(0,0,0,.12);
+        cursor: pointer; font-size: 16px; line-height: 1;
+      }
+      #perma-toggle:hover{ background:#f3f4f6; }
+    </style>
+    <script>
+      const boot = () => {
+        const doc = window.parent.document;
+        if (doc.getElementById('perma-toggle')) return;
+        const btn = doc.createElement('button');
+        btn.id = 'perma-toggle';
+        btn.title = '展开/收起侧边栏';
+        btn.innerHTML = '☰';
+        btn.onclick = () => {
+          const native =
+            doc.querySelector('[data-testid="collapsedControl"]') ||
+            doc.querySelector('button[title="Close sidebar"]') ||
+            doc.querySelector('button[aria-label="menu"]');
+          if (native) native.click();
+        };
+        doc.body.appendChild(btn);
+      };
+      const itv = setInterval(() => { try { boot(); clearInterval(itv); } catch(e){} }, 250);
+    </script>
+    """, height=0)
+
 apply_compact_css()
+mount_fixed_sidebar_toggle()
 
 # ---------------- 小工具 ----------------
 BAR_COLOR  = "#4C78A8"
@@ -64,8 +115,7 @@ def style_bar(fig, x_col, y_col, peak_x=None, title=None):
         fig.add_vline(x=peak_x, line_width=1, line_dash="dot", line_color=PEAK_COLOR)
     return fig
 
-def chips(items):
-    return " ".join([f"<span class='file-badge'>{escape(str(i))}</span>" for i in items])
+def chips(items): return " ".join([f"<span class='file-badge'>{escape(str(i))}</span>" for i in items])
 
 # ---------------- 持久化：uploads/ ----------------
 UPLOADS_DIR = Path("uploads"); UPLOADS_DIR.mkdir(exist_ok=True)
@@ -88,7 +138,6 @@ def restore_by_sha(sha:str):
     return matches[0] if matches else None
 
 def save_uploaded_auto(up_file):
-    """自动保存上传文件，返回(保存路径, sha, 文件名)"""
     data = up_file.getbuffer() if hasattr(up_file,"getbuffer") else up_file.read()
     if isinstance(data, memoryview): data = data.tobytes()
     sha = _sha12(data)
@@ -98,7 +147,6 @@ def save_uploaded_auto(up_file):
     return path, sha, fname
 
 def list_saved_files(max_n=30):
-    """按修改时间降序列出 uploads/ 下的已保存文件"""
     files = list(UPLOADS_DIR.glob("*_*"))
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     out = []
@@ -127,23 +175,20 @@ up = st.file_uploader("上传 CSV（原始或已聚合均可）", type=["csv"])
 saved_sha = st.query_params.get("file", None)
 restored_path = restore_by_sha(saved_sha) if saved_sha else None
 
-# 统一数据来源：优先新上传（并自动保存与写 URL），否则尝试从 URL 恢复
 source = None
 if up is not None:
     path, sha, fname = save_uploaded_auto(up)
     if saved_sha != sha:
-        st.query_params["file"] = sha  # 写入 URL
+        st.query_params["file"] = sha
         st.rerun()
     source = str(path)
 elif restored_path is not None and restored_path.exists():
     source = str(restored_path)
 
-# “上传区”下方显示当前文件 + 历史文件切换
 with st.container(border=True):
     if source is None:
         st.info("📄 还没有选择文件。请上传，或从“已保存文件”中选择。")
     else:
-        # 当前文件信息
         cur_path = Path(source)
         cur_name = cur_path.name.split("_",1)[1] if "_" in cur_path.name else cur_path.name
         cur_sha  = cur_path.name.split("_",1)[0]
@@ -160,7 +205,6 @@ with st.container(border=True):
             unsafe_allow_html=True
         )
 
-    # 历史文件下拉
     saved = list_saved_files()
     if saved:
         options = {f"{s['orig']}  ·  {human_size(s['size'])}  ·  {s['mtime']}  ·  SHA:{s['sha']}": s for s in saved}
@@ -173,12 +217,10 @@ with st.container(border=True):
                 st.query_params["file"] = chosen["sha"]
                 st.rerun()
         if col_b.button("复制可分享链接", use_container_width=True):
-            # 当前页面基础 URL
             base = st.request.url if hasattr(st, "request") else ""
             share_url = base.split("?",1)[0] + f"?file={chosen['sha']}"
             st.code(share_url, language="text")
 
-# 如果还是没有 source，停止
 if source is None:
     st.stop()
 
@@ -192,11 +234,10 @@ if raw.empty:
     st.error("读取到空表，请检查 CSV 内容。")
     st.stop()
 
-# ---------------- 侧边栏（把功能都放左侧） ----------------
+# ---------------- 侧边栏 ----------------
 with st.sidebar:
     st.header("维度与度量")
 
-    # 自动识别时间列、数值列
     def can_dt(s)->float:
         try:  return pd.to_datetime(s, errors="coerce").notna().mean()
         except: return 0.0
@@ -234,7 +275,6 @@ else:
 
 for c in y_cols: df[c] = pd.to_numeric(df[c], errors="coerce")
 
-# 未选 Y 给出提示
 if len(y_cols)==0:
     st.info("👉 请在左侧 **选择至少一个纵坐标（数值列）** 再查看图表。")
     st.stop()
@@ -253,7 +293,7 @@ if x_is_dt and x_time_mode in ["小时(0–23)","月份(1~12)"]:
 elif pd.api.types.is_numeric_dtype(df_view[x_col]):
     df_view = df_view.sort_values(x_col)
 
-# ---------------- 显示范围（也在侧边栏） ----------------
+# ---------------- 显示范围（侧边栏） ----------------
 with st.sidebar:
     st.subheader("显示范围")
     x_vals = df_view[x_col]
