@@ -7,7 +7,7 @@ from html import escape
 from pathlib import Path
 import hashlib, re, io, time
 
-# ========== 页面设置 ==========
+# ---------------- 页面设置 ----------------
 st.set_page_config(
     page_title="数据聚合处理网站",
     page_icon="🧮",
@@ -15,15 +15,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ========== 样式（纯 CSS）==========
+# ---------------- 样式 ----------------
 def apply_compact_css():
     st.markdown("""
     <style>
-      .block-container { padding-top: 1.2rem; padding-bottom: 1.2rem; }
+      /* 主内容整体向下移动 75px */
+      .block-container { padding-top: calc(1.2rem + 75px) !important; padding-bottom: 1.2rem; }
       section[data-testid="stSidebar"] { padding-top: .6rem !important; }
       .modebar { filter: opacity(75%); }
 
-      /* —— 始终可见的原生侧栏开关（纯 CSS，无 JS）—— */
+      /* —— 始终可见的原生侧栏开关（纯 CSS）—— */
       .stApp [data-testid="collapsedControl"]{
         position: fixed !important;
         left: 12px !important;
@@ -38,9 +39,8 @@ def apply_compact_css():
         padding: 6px 8px !important;
         box-shadow: 0 4px 10px rgba(0,0,0,.12) !important;
       }
-      .stApp [data-testid="collapsedControl"] > div{
-        transform: scale(1.12);
-      }
+      .stApp [data-testid="collapsedControl"] > div{ transform: scale(1.12); }
+
       .stApp section[data-testid="stSidebar"] button[title="Close sidebar"],
       .stApp section[data-testid="stSidebar"] [data-testid="stSidebarNavClose"],
       .stApp section[data-testid="stSidebar"] button[aria-label="menu"],
@@ -59,7 +59,7 @@ def apply_compact_css():
         box-shadow: 0 4px 10px rgba(0,0,0,.12) !important;
       }
 
-      /* —— 页面背景：超浅蓝竖向渐变 + 左右装饰条（黄→蓝），条宽 28px —— */
+      /* 背景：浅蓝竖向渐变 + 左右条带（黄→蓝；宽 28px）*/
       .stApp{
         background-color:#ffffff !important;
         background-image:
@@ -83,7 +83,7 @@ def apply_compact_css():
 
 apply_compact_css()
 
-# ========== 工具 ==========
+# ---------------- 工具 ----------------
 BAR_COLOR  = "#4C78A8"
 PEAK_COLOR = "#E45756"
 
@@ -104,7 +104,7 @@ def style_bar(fig, x_col, y_col, peak_x=None, title=None):
         fig.add_vline(x=peak_x, line_width=1, line_dash="dot", line_color=PEAK_COLOR)
     return fig
 
-# ========== 本地持久化 ==========
+# ---------------- 本地持久化 ----------------
 UPLOADS_DIR = Path("uploads")
 UPLOADS_DIR.mkdir(exist_ok=True)
 
@@ -157,27 +157,48 @@ def human_size(b):
         b /= 1024.0
     return f"{b:.1f}TB"
 
-# ========== 顶部 ==========
+# ---------------- 顶部标题 ----------------
 st.title("数据聚合处理网站")
 st.caption("上传 CSV → 左侧选择 X/时间派生/Y/聚合与范围 → 右侧出图与导出")
 
-# ========== 上传/恢复：无论有没有文件，侧栏都会显示 ==========
-up = st.file_uploader("上传 CSV（原始或已聚合均可）", type=["csv"])
+# ---------------- 活跃文件：URL 和 session_state 双轨保证 ----------------
+# 1) 读取 URL 中 ?file=sha
+url_sha = None
+try:
+    if hasattr(st, "query_params"):
+        url_sha = st.query_params.get("file", None)
+except Exception:
+    url_sha = None
 
-saved_sha = st.query_params.get("file", None) if hasattr(st, "query_params") else None
-restored_path = restore_by_sha(saved_sha) if saved_sha else None
+# 2) 同步到 session_state
+if url_sha and st.session_state.get("active_file_sha") != url_sha:
+    st.session_state["active_file_sha"] = url_sha
+
+active_sha = st.session_state.get("active_file_sha")  # 单一“真相来源”
+
+# ---------------- 上传/恢复 ----------------
+up = st.file_uploader("上传 CSV（原始或已聚合均可）", type=["csv"])
 
 source = None
 if up is not None:
     path, sha, fname = save_uploaded_auto(up)
-    if hasattr(st, "query_params") and saved_sha != sha:
-        st.query_params["file"] = sha
-        st.rerun()
-    source = str(path)
-elif restored_path is not None and restored_path.exists():
-    source = str(restored_path)
+    st.session_state["active_file_sha"] = sha  # 立刻启用
+    # 同步 URL（如果支持）
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params["file"] = sha
+    except Exception:
+        pass
+    st.rerun()
 
-# 当前/历史文件展示（主区，不影响侧栏是否出现）
+# 如果上面 rerun 了，这里重新走；没上传时就用 active_sha 恢复
+active_sha = st.session_state.get("active_file_sha")
+if active_sha:
+    restored_path = restore_by_sha(active_sha)
+    if restored_path and restored_path.exists():
+        source = str(restored_path)
+
+# ---------------- 当前/历史文件展示（主区） ----------------
 with st.container(border=True):
     if source is None:
         st.info("📄 还没有选择文件。请上传，或从“已保存文件”中选择。")
@@ -201,25 +222,29 @@ with st.container(border=True):
     saved = list_saved_files()
     if saved:
         options = {f"{s['orig']}  ·  {human_size(s['size'])}  ·  {s['mtime']}  ·  SHA:{s['sha']}": s for s in saved}
-        default_idx = 0
-        if saved_sha:
-            keys = list(options.keys())
-            for i,k in enumerate(keys):
-                if options[k]['sha']==saved_sha:
-                    default_idx = i; break
-        sel = st.selectbox("📂 已保存文件（最近）", list(options.keys()), index=default_idx)
+        # 默认高亮当前 active_sha
+        idx = 0
+        keys = list(options.keys())
+        for i,k in enumerate(keys):
+            if options[k]['sha']==st.session_state.get("active_file_sha"):
+                idx = i; break
+        sel = st.selectbox("📂 已保存文件（最近）", keys, index=idx)
         chosen = options[sel]
         col_a, col_b = st.columns([1,1])
         if col_a.button("打开此文件", use_container_width=True):
-            if hasattr(st, "query_params") and saved_sha != chosen["sha"]:
-                st.query_params["file"] = chosen["sha"]
-                st.rerun()
+            st.session_state["active_file_sha"] = chosen["sha"]
+            try:
+                if hasattr(st, "query_params"):
+                    st.query_params["file"] = chosen["sha"]
+            except Exception:
+                pass
+            st.rerun()
         if col_b.button("复制可分享链接", use_container_width=True):
             base = st.request.url if hasattr(st, "request") else ""
             share_url = (base.split("?",1)[0] if base else "") + f"?file={chosen['sha']}"
             st.code(share_url or f"?file={chosen['sha']}", language="text")
 
-# 读取数据（为 None 时不报错、仅禁用控件）
+# ---------------- 读取数据 ----------------
 raw = None
 if source is not None:
     try:
@@ -228,11 +253,10 @@ if source is not None:
         st.error(f"读取 CSV 失败：{e}")
         raw = None
 
-# ========== 侧边栏（始终存在）==========
+# ---------------- 侧边栏：始终显示 ----------------
 with st.sidebar:
     st.header("维度与度量")
 
-    # 辅助函数
     def can_dt(s)->float:
         try:  return pd.to_datetime(s, errors="coerce").notna().mean()
         except: return 0.0
@@ -241,20 +265,17 @@ with st.sidebar:
         except: return False
 
     if raw is None or raw.empty:
-        # 无文件/读取失败：放置“禁用”的控件
         st.selectbox("横坐标 (X) 🌐", options=[], disabled=True, placeholder="请先上传文件")
         st.selectbox("时间派生 ⏱️", options=[], disabled=True)
         st.multiselect("纵坐标 (Y，可多选) 📈", options=[], disabled=True)
         st.selectbox("聚合方式（对 Y）🧮", ["sum","mean","median","max","min"], disabled=True)
         st.caption("⬅️ 请先在主区域上传 CSV 文件；上传后这里会自动激活。")
-        # 显示范围区域（禁用态）
+
         st.subheader("显示范围")
         st.slider("X 范围", 0, 1, (0, 1), disabled=True)
-        # 结束侧栏
         x_col = x_time_mode = None
         y_cols, agg_fn = [], "sum"
     else:
-        # 有数据：正常渲染控件
         dt_cols  = [c for c in raw.columns if can_dt(raw[c])>0.5]
         num_cols = [c for c in raw.columns if is_num(raw[c])]
 
@@ -272,12 +293,12 @@ with st.sidebar:
         agg_fn = st.selectbox("聚合方式（对 Y）🧮", ["sum","mean","median","max","min"],
                               disabled=(len(y_cols)==0))
 
-# 若没有数据，主区给出提示并结束（侧栏已显示）
+# 没有数据：主区提示即可（侧栏已显示）
 if raw is None or raw.empty:
     st.info("👉 请先上传/选择 CSV 文件。")
     st.stop()
 
-# ========== 构造分组键 ==========
+# ---------------- 构造分组键 ----------------
 df = raw.copy()
 x_is_dt = False
 if x_col is not None and x_col in df.columns:
@@ -305,7 +326,6 @@ if x_is_dt:
 else:
     df["_X_key"] = df[x_col].astype("string")
 
-# 转数值
 for c in y_cols:
     if c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -314,21 +334,20 @@ if len(y_cols)==0:
     st.info("👉 请在左侧 **选择至少一个纵坐标（数值列）** 再查看图表。")
     st.stop()
 
-# ========== 聚合 ==========
+# ---------------- 聚合 ----------------
 with st.spinner("正在计算聚合视图…"):
     df = df.dropna(subset=["_X_key"] + y_cols)
     grouped = df.groupby("_X_key")
     agg_map = {c: agg_fn for c in y_cols}
     df_view = grouped.agg(agg_map).reset_index().rename(columns={"_X_key": x_col})
 
-# 合理排序
 if x_is_dt and x_time_mode in ["小时(0–23)","月份(1~12)"]:
     df_view[x_col] = pd.to_numeric(df_view[x_col], errors="coerce")
     df_view = df_view.sort_values(x_col)
 elif pd.api.types.is_numeric_dtype(df_view[x_col]):
     df_view = df_view.sort_values(x_col)
 
-# ========== 侧边栏“显示范围”控件（此处有数据时才渲染）==========
+# ---------------- 侧边栏显示范围（有数据才渲染） ----------------
 with st.sidebar:
     st.subheader("显示范围")
     x_vals = df_view[x_col]
@@ -360,7 +379,7 @@ with st.sidebar:
         chosen = st.multiselect("选择 X 类别", options=cats, default=cats)
         df_view = df_view[df_view[x_col].astype("string").isin(chosen)]
 
-# ========== 顶部说明 & 图表 ==========
+# ---------------- 顶部说明与图表 ----------------
 st.subheader(f"按「{x_col}」聚合（{agg_fn}）")
 st.markdown(
     f"**X：** `{x_col}` {' · ⏱️ '+x_time_mode if x_is_dt else ''}  "
@@ -391,7 +410,7 @@ else:
                                 "modeBarButtonsToRemove":["lasso2d","select2d","autoscale",
                                                           "zoomIn2d","zoomOut2d"]})
 
-# ========== 表格 & 下载 ==========
+# ---------------- 表格与下载 ----------------
 tab1, tab2 = st.tabs(["当前聚合视图 (可下载)", "原始数据预览"])
 with tab1:
     st.dataframe(df_view, use_container_width=True, hide_index=True)
