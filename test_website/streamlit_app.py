@@ -1,4 +1,4 @@
-# streamlit_app.py —— 本地持久化上传 + 自动恢复 + 两侧渐变条带
+# streamlit_app.py —— 简化版：自动保存上传文件（无保存按钮）
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -168,37 +168,11 @@ with st.sidebar:
     st.caption("右上角按钮可展开/收起侧栏。上传 CSV 后解锁“维度与度量”。")
 
 # ---------- 上传区 + 本地持久化控制 ----------
-c_up, c_ops = st.columns([4, 2])
-with c_up:
-    up = st.file_uploader("上传 CSV（原始明细或已聚合均可）", type=["csv"])
+up = st.file_uploader("上传 CSV（原始明细或已聚合均可）", type=["csv"])
 
 # 从 URL 恢复
 saved_sha = st.query_params.get("file", None)
 restored_path = restore_path_by_sha(saved_sha) if saved_sha else None
-
-with c_ops:
-    st.markdown("#### ")
-    if up is not None:
-        if st.button("💾 保存并记住"):
-            path, sha, fname = save_uploaded_file_to_disk(up)
-            st.query_params["file"] = sha
-            st.success(f"已保存：{fname}")
-            st.rerun()
-
-    # 选择已保存文件
-    saved_files = sorted(UPLOADS_DIR.glob("*.csv"),
-                         key=lambda p: p.stat().st_mtime, reverse=True)
-    name2path = {p.name: p for p in saved_files}
-    choice = st.selectbox("📂 已保存文件", ["（不选）"] + list(name2path.keys()))
-    if choice != "（不选）":
-        restored_path = name2path[choice]
-        st.query_params["file"] = restored_path.name.split("_", 1)[0]
-        st.rerun()
-
-    if st.button("🧹 清除记忆（仅清 URL）"):
-        st.query_params.clear()
-        st.info("已清除链接记忆。若需物理删除文件，请到 uploads/ 目录手动删除。")
-        st.rerun()
 
 # 统一数据来源
 source = None
@@ -207,7 +181,7 @@ if up is not None:
 elif restored_path is not None and Path(restored_path).exists():
     source = str(restored_path)
 else:
-    st.info("请上传 CSV 文件开始分析，或在右侧 **📂 已保存文件** 中选择。")
+    st.info("请上传 CSV 文件开始分析，或从右侧 **📂 已保存文件** 中选择。")
     st.stop()
 
 # 读取数据
@@ -238,38 +212,37 @@ datetime_candidates = [c for c in raw.columns if can_parse_datetime(raw[c]) > 0.
 numeric_candidates  = [c for c in raw.columns if is_numeric_like(raw[c])]
 
 # ---------- 侧边栏：数据依赖控件 ----------
-with st.sidebar:
-    x_col = st.selectbox(
-        "横坐标 (X) 🌐",
-        options=list(raw.columns),
-        help="可选时间/数值/类别列；若为时间列可派生为小时/日期/星期/月"
-    )
-    x_is_datetime = x_col in datetime_candidates
-    x_time_mode = None
-    if x_is_datetime:
-        x_time_mode = st.selectbox(
-            "时间派生 ⏱️",
-            ["小时(0–23)", "日期", "星期(一~日)", "月份(1~12)"],
-            help="从时间列派生一个分组键再聚合"
-        )
-
-    y_options = [c for c in numeric_candidates if c != x_col]
-    y_key = f"ycols::{x_col}"  # 切换 X 时清空 Y
-    y_cols = st.multiselect(
-        "纵坐标 (Y，可多选) 📈",
-        options=y_options,
-        default=[],
-        key=y_key,
-        placeholder="请选择 1~3 个数值列，例如 trip_km、fare_amount、avg_speed_kmph …",
-        help="建议选择 1~3 个指标，便于对比"
+x_col = st.selectbox(
+    "横坐标 (X) 🌐",
+    options=list(raw.columns),
+    help="可选时间/数值/类别列；若为时间列可派生为小时/日期/星期/月"
+)
+x_is_datetime = x_col in datetime_candidates
+x_time_mode = None
+if x_is_datetime:
+    x_time_mode = st.selectbox(
+        "时间派生 ⏱️",
+        ["小时(0–23)", "日期", "星期(一~日)", "月份(1~12)"],
+        help="从时间列派生一个分组键再聚合"
     )
 
-    agg_fn = st.selectbox(
-        "聚合方式（对 Y 列）🧮",
-        ["sum", "mean", "median", "max", "min"],
-        index=0,
-        disabled=(len(y_cols) == 0)
-    )
+y_options = [c for c in numeric_candidates if c != x_col]
+y_key = f"ycols::{x_col}"  # 切换 X 时清空 Y
+y_cols = st.multiselect(
+    "纵坐标 (Y，可多选) 📈",
+    options=y_options,
+    default=[],
+    key=y_key,
+    placeholder="请选择 1~3 个数值列，例如 trip_km、fare_amount、avg_speed_kmph …",
+    help="建议选择 1~3 个指标，便于对比"
+)
+
+agg_fn = st.selectbox(
+    "聚合方式（对 Y 列）🧮",
+    ["sum", "mean", "median", "max", "min"],
+    index=0,
+    disabled=(len(y_cols) == 0)
+)
 
 # ---------- 构造分组键（含时间派生） ----------
 df = raw.copy()
