@@ -1,10 +1,11 @@
+# streamlit_app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 from html import escape
 from pathlib import Path
-import hashlib, re, io
+import hashlib, re, io, os, time
 
 # ---------------- 页面配置 ----------------
 st.set_page_config(
@@ -37,6 +38,10 @@ def apply_compact_css():
         background-size: 24px 100vh, 24px 100vh;
         background-attachment: fixed,fixed;
       }
+      .file-badge{
+        display:inline-block;background:#eef2ff;color:#3730a3;border-radius:10px;
+        padding:3px 8px;margin:0 6px;font-size:12px
+      }
     </style>
     """, unsafe_allow_html=True)
 apply_compact_css()
@@ -60,7 +65,7 @@ def style_bar(fig, x_col, y_col, peak_x=None, title=None):
     return fig
 
 def chips(items):
-    return " ".join([f"<span style='background:#eef2ff;color:#3730a3;border-radius:12px;padding:2px 8px;margin-right:6px;font-size:12px'>{escape(str(i))}</span>" for i in items])
+    return " ".join([f"<span class='file-badge'>{escape(str(i))}</span>" for i in items])
 
 # ---------------- 持久化：uploads/ ----------------
 UPLOADS_DIR = Path("uploads"); UPLOADS_DIR.mkdir(exist_ok=True)
@@ -92,11 +97,31 @@ def save_uploaded_auto(up_file):
     if not path.exists(): path.write_bytes(data)
     return path, sha, fname
 
+def list_saved_files(max_n=30):
+    """按修改时间降序列出 uploads/ 下的已保存文件"""
+    files = list(UPLOADS_DIR.glob("*_*"))
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    out = []
+    for p in files[:max_n]:
+        name = p.name
+        sha = name.split("_", 1)[0]
+        orig = name.split("_", 1)[1] if "_" in name else name
+        size = p.stat().st_size
+        mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(p.stat().st_mtime))
+        out.append(dict(path=p, sha=sha, orig=orig, size=size, mtime=mtime))
+    return out
+
+def human_size(b):
+    for unit in ["B","KB","MB","GB"]:
+        if b < 1024: return f"{b:.1f}{unit}"
+        b /= 1024.0
+    return f"{b:.1f}TB"
+
 # ---------------- 顶部 ----------------
 st.title("数据聚合处理网站")
 st.caption("上传 CSV → 左侧选择 X/时间派生/Y/聚合与范围 → 右侧出图与导出")
 
-# ---------------- 上传/恢复 ----------------
+# ---------------- 上传/恢复 + “当前文件/历史文件”展示 ----------------
 up = st.file_uploader("上传 CSV（原始或已聚合均可）", type=["csv"])
 
 saved_sha = st.query_params.get("file", None)
@@ -106,13 +131,55 @@ restored_path = restore_by_sha(saved_sha) if saved_sha else None
 source = None
 if up is not None:
     path, sha, fname = save_uploaded_auto(up)
-    st.query_params["file"] = sha            # 写入 URL
-    source = str(path)                        # 直接使用磁盘文件
-    # 不强制 st.rerun，避免循环；当前会直接用新文件渲染
+    if saved_sha != sha:
+        st.query_params["file"] = sha  # 写入 URL
+        st.rerun()
+    source = str(path)
 elif restored_path is not None and restored_path.exists():
     source = str(restored_path)
-else:
-    st.info("📄 请先上传 CSV 文件开始分析。")
+
+# “上传区”下方显示当前文件 + 历史文件切换
+with st.container(border=True):
+    if source is None:
+        st.info("📄 还没有选择文件。请上传，或从“已保存文件”中选择。")
+    else:
+        # 当前文件信息
+        cur_path = Path(source)
+        cur_name = cur_path.name.split("_",1)[1] if "_" in cur_path.name else cur_path.name
+        cur_sha  = cur_path.name.split("_",1)[0]
+        try:
+            df_meta = read_csv_any(source)
+            rows, cols = df_meta.shape
+        except Exception:
+            rows, cols = 0, 0
+        st.markdown(
+            f"**📌 当前文件**：{chips([cur_name])} "
+            f"{chips(['SHA:'+cur_sha])} "
+            f"{chips([human_size(cur_path.stat().st_size)])} "
+            f"{chips([f'{rows}行 × {cols}列'])}",
+            unsafe_allow_html=True
+        )
+
+    # 历史文件下拉
+    saved = list_saved_files()
+    if saved:
+        options = {f"{s['orig']}  ·  {human_size(s['size'])}  ·  {s['mtime']}  ·  SHA:{s['sha']}": s for s in saved}
+        sel = st.selectbox("📂 已保存文件（最近）", list(options.keys()), index=0 if source is None else
+                           next((i for i,k in enumerate(options.keys()) if options[k]['sha']==saved_sha), 0))
+        chosen = options[sel]
+        col_a, col_b = st.columns([1,1])
+        if col_a.button("打开此文件", use_container_width=True):
+            if saved_sha != chosen["sha"]:
+                st.query_params["file"] = chosen["sha"]
+                st.rerun()
+        if col_b.button("复制可分享链接", use_container_width=True):
+            # 当前页面基础 URL
+            base = st.request.url if hasattr(st, "request") else ""
+            share_url = base.split("?",1)[0] + f"?file={chosen['sha']}"
+            st.code(share_url, language="text")
+
+# 如果还是没有 source，停止
+if source is None:
     st.stop()
 
 # 读取数据
@@ -165,7 +232,6 @@ if x_is_dt:
 else:
     df["_X_key"] = df[x_col].astype("string")
 
-# Y → 数值
 for c in y_cols: df[c] = pd.to_numeric(df[c], errors="coerce")
 
 # 未选 Y 给出提示
