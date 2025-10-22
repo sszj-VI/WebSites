@@ -1,9 +1,13 @@
-# streamlit_app.py —— 渐变侧边条带版（无主题菜单，其他功能不变）
+# streamlit_app.py —— 本地持久化上传 + 自动恢复 + 两侧渐变条带
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 from html import escape
+
+# 新增：持久化 & 路由参数
+from pathlib import Path
+import hashlib, re, io
 
 # ---------- 页面基础：默认展开侧边栏 ----------
 st.set_page_config(
@@ -13,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ---------- 轻量 CSS：紧凑布局 + 显眼开关 + 渐变“侧边条带” ----------
+# ---------- 轻量 CSS：紧凑布局 + 显眼开关 + 两侧“黄→蓝”渐变条带 ----------
 def apply_compact_css():
     st.markdown("""
     <style>
@@ -51,26 +55,24 @@ def apply_compact_css():
       }
 
       /* —— 两侧渐变条带（更宽 + 黄→蓝） —— */
-.stApp{
-  background-color: #ffffff !important;
+      .stApp{
+        background-color: #ffffff !important;
 
-  /* 左条带、右条带 */
-  background-image:
-    /* 左：从上到下 由黄到蓝 */
-    linear-gradient(180deg, rgba(245,158,11,.42) 0%, rgba(37,99,235,.42) 100%),
-    /* 右：同样从上到下 由黄到蓝（想做镜像可把第二个调成 0% 蓝 → 100% 黄） */
-    linear-gradient(180deg, rgba(245,158,11,.42) 0%, rgba(37,99,235,.42) 100%);
-  background-repeat: no-repeat, no-repeat;
-  background-position: left top, right top;
+        /* 左条带、右条带 */
+        background-image:
+          /* 左：从上到下 由黄到蓝 */
+          linear-gradient(180deg, rgba(245,158,11,.42) 0%, rgba(37,99,235,.42) 100%),
+          /* 右：从上到下 由黄到蓝（如需镜像可调换顺序） */
+          linear-gradient(180deg, rgba(245,158,11,.42) 0%, rgba(37,99,235,.42) 100%);
+        background-repeat: no-repeat, no-repeat;
+        background-position: left top, right top;
 
-  /* ⬅ 条带宽度（原来 14px）*/
-  background-size: 24px 100vh, 24px 100vh;
+        /* 条带宽度（可改 20~30px） */
+        background-size: 24px 100vh, 24px 100vh;
 
-  /* 固定在两侧，不随滚动抖动 */
-  background-attachment: fixed, fixed;
-}
-
-      /* 在有侧边栏时，条带自然位于侧边栏下方，不影响交互 */
+        /* 固定在两侧，不随滚动抖动 */
+        background-attachment: fixed, fixed;
+      }
     </style>
     """, unsafe_allow_html=True)
 
@@ -109,6 +111,53 @@ def chips(items):
         for i in items
     ])
 
+# ===================== 本地持久化：uploads/ ===================== #
+UPLOADS_DIR = Path("uploads")
+UPLOADS_DIR.mkdir(exist_ok=True)
+
+def _sanitize_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+
+def _sha12(b: bytes) -> str:
+    return hashlib.sha1(b).hexdigest()[:12]
+
+def save_uploaded_file_to_disk(up_file):
+    """
+    保存 st.file_uploader 的文件到 uploads/：
+    返回 (Path, sha, 保存文件名)
+    """
+    data = up_file.getbuffer() if hasattr(up_file, "getbuffer") else up_file.read()
+    if isinstance(data, memoryview):
+        data = data.tobytes()
+    sha = _sha12(data)
+    fname = f"{sha}_{_sanitize_name(up_file.name)}"
+    path = UPLOADS_DIR / fname
+    if not path.exists():
+        path.write_bytes(data)
+    return path, sha, fname
+
+@st.cache_data(show_spinner=False)
+def load_csv_from_path(path_str: str) -> pd.DataFrame:
+    """从磁盘路径读取 CSV（带缓存）"""
+    return pd.read_csv(path_str, sep=None, engine="python")
+
+def read_csv_any(src):
+    """
+    兼容两种来源：
+    - st.file_uploader 返回的 UploadedFile
+    - 磁盘路径（str/Path）
+    """
+    if isinstance(src, (str, Path)):
+        return load_csv_from_path(str(src))
+    else:
+        bio = io.BytesIO(src.getbuffer() if hasattr(src, "getbuffer") else src.read())
+        return pd.read_csv(bio, sep=None, engine="python")
+
+def restore_path_by_sha(sha: str):
+    matches = list(UPLOADS_DIR.glob(f"{sha}_*"))
+    return matches[0] if matches else None
+# =============================================================== #
+
 # ---------- 顶部 ----------
 st.title("数据聚合处理网站")
 st.caption("用户自选横/纵坐标 · 时间列可派生（小时/日期/星期/月） · 动态范围筛选 · 多参量/多图")
@@ -118,32 +167,59 @@ with st.sidebar:
     st.subheader("🎛 面板")
     st.caption("右上角按钮可展开/收起侧栏。上传 CSV 后解锁“维度与度量”。")
 
-# ---------- 上传 CSV ----------
-up = st.file_uploader("上传 CSV（原始明细或已聚合均可）", type=["csv"])
+# ---------- 上传区 + 本地持久化控制 ----------
+c_up, c_ops = st.columns([4, 2])
+with c_up:
+    up = st.file_uploader("上传 CSV（原始明细或已聚合均可）", type=["csv"])
 
-def read_csv_any(src):
-    return pd.read_csv(src, sep=None, engine="python")
+# 从 URL 恢复
+saved_sha = st.query_params.get("file", None)
+restored_path = restore_path_by_sha(saved_sha) if saved_sha else None
 
-# 侧边栏“维度与度量”标题总出现；无文件时仅提示
-with st.sidebar:
-    st.subheader("维度与度量")
+with c_ops:
+    st.markdown("#### ")
+    if up is not None:
+        if st.button("💾 保存并记住"):
+            path, sha, fname = save_uploaded_file_to_disk(up)
+            st.query_params["file"] = sha
+            st.success(f"已保存：{fname}")
+            st.rerun()
 
-if up is None:
-    with st.sidebar:
-        st.info("请先上传 CSV 解锁这里的设置。")
-    st.info("请上传 CSV 文件以开始分析。")
+    # 选择已保存文件
+    saved_files = sorted(UPLOADS_DIR.glob("*.csv"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)
+    name2path = {p.name: p for p in saved_files}
+    choice = st.selectbox("📂 已保存文件", ["（不选）"] + list(name2path.keys()))
+    if choice != "（不选）":
+        restored_path = name2path[choice]
+        st.query_params["file"] = restored_path.name.split("_", 1)[0]
+        st.rerun()
+
+    if st.button("🧹 清除记忆（仅清 URL）"):
+        st.query_params.clear()
+        st.info("已清除链接记忆。若需物理删除文件，请到 uploads/ 目录手动删除。")
+        st.rerun()
+
+# 统一数据来源
+source = None
+if up is not None:
+    source = up
+elif restored_path is not None and Path(restored_path).exists():
+    source = str(restored_path)
+else:
+    st.info("请上传 CSV 文件开始分析，或在右侧 **📂 已保存文件** 中选择。")
     st.stop()
 
-# 读取
+# 读取数据
 try:
-    raw = read_csv_any(up)
+    raw = read_csv_any(source)
 except Exception as e:
     st.error(f"读取 CSV 失败：{e}")
     st.stop()
 if raw.empty:
     st.error("读取到的表为空，请检查 CSV 内容。")
     st.stop()
-st.toast("✅ 文件上传成功，正在解析…", icon="✅")
+st.toast("✅ 数据就绪", icon="✅")
 
 # ---------- 工具：识别时间列/数值列 ----------
 def can_parse_datetime(series) -> float:
